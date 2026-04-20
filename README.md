@@ -66,7 +66,7 @@ Requirements:
 Then:
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/ADSync.git
+git clone https://github.com/JohnnyTheCoder1/ADSync.git
 cd ADSync
 pip install -e .
 ```
