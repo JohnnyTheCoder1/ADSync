@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+$null
+
+# Test media / personal content — never commit
+From/
+Testtracks/
+final/
+sample_data/easy/
+sample_data/medium/
+sample_data/hard/
+sample_data/failure/
+*.mkv
+*.mp4
+*.m4a
+*.mp3
+*.wav
+*.flac
+*.aac
+*.opus
+*.ac3
+
+# Debug / analysis artifacts
+debug_*/
+_probe_*.json
+*_report.json
+
+# Personal batch scripts (user-specific paths)
+batch_*.py
+
+# Claude / agent scratch
+CLAUDE.md
