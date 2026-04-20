@@ -21,6 +21,19 @@ ADSync fixes that. You hand it a video file and an unsynced AD track. It gives y
 - **Archivists** pairing old descriptive-audio recordings with modern releases
 - **Media tinkerers** who want one command instead of an evening of nudging
 
+## What makes this different
+
+Most existing AD-sync tools chop the description into fixed chunks and align each one independently. That works for simple drift, but it falls apart when the cuts don't match: you get audio that skips back and replays the same second, jumps forward, then rewinds when the next chunk disagrees with the last. Stutter loops, phantom repeats, mid-sentence rewinds. Unlistenable for the person who actually needs the narration.
+
+ADSync refuses to make per-chunk decisions in the first place. Instead:
+
+- It builds a **top-K candidate lattice** of plausible offsets across every analysis window
+- Runs a **Viterbi / DP decoder** with explicit penalties on offset jumps and curvature — so the track is solved **globally**, not locally
+- Fits a **shape-preserving monotone PCHIP warp** through the decoded points — guaranteed never to run backwards in time
+- Renders the final audio from a **continuous time-map**, sample by sample — no seams, no re-glueing of chunks
+
+The outcome: no stutter loops, no backwards audio, no phantom repeats. Either the alignment holds cleanly or the confidence score flags it up front — ADSync won't silently produce a broken mix and hope you don't notice.
+
 ## What you get
 
 - **One-shot sync → mux.** Input two files, output one MKV with the AD embedded as a tagged, selectable track.
