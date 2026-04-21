@@ -1,21 +1,21 @@
 # ADSync
 
-Sync a community-made audio description track to your copy of a video, and mux them into one MKV. One command.
+Sync an audio description track to your copy of a video, and mux them into one MKV. One command.
 
 ## Why this exists
 
-First time I tried to do this, I had VLC open on one screen and Windows Media Player on the other. Play the video, start the AD a few seconds behind, listen, pause, rewind, nudge the AD a second earlier, play again. By the time the first ad break hit, the two were off in a way no single offset would fix. I gave up around minute twelve.
+First time I tried this was with an episode of a Netflix show and an AD track I'd pulled from [audiovault.net](https://audiovault.net). I had VLC open on one screen and Windows Media Player on the other. Play the video, start the AD a few seconds behind, listen, pause, rewind, nudge the AD a second earlier, play again. By the time the first ad break hit, the two were off in a way no single offset was going to fix. I gave up around minute twelve.
 
-Doing that for one episode is a slow evening. Doing it for a season is a problem. And the people who actually need the audio description, blind and visually impaired viewers, shouldn't have to do any of it in the first place.
+Doing that for one episode is a slow evening. Doing it for a season is a problem. I'm blind, so this isn't really an accessibility project for me. It's just how I watch TV.
 
-The reason it's hard: the fan who recorded the AD did it against their copy of the episode, and yours is almost never the same cut. Different intro length, different ad breaks, different frame rate, an inserted recap, the occasional missing scene. Drop the AD on top of a mismatched cut and by minute ten it's narrating the wrong thing.
+The reason it's hard: whoever recorded the AD did it against their copy of the episode, and yours is almost never the same cut. Different intro length, different ad breaks, different frame rate, an inserted recap, the occasional missing scene. Drop the AD on top of a mismatched cut and by minute ten it's narrating the wrong thing.
 
 ADSync takes the video and the unsynced AD, does the alignment in one pass, and hands you back an MKV with the AD embedded as a selectable audio stream. If it can't find a confident alignment it tells you instead of quietly producing a broken mix.
 
 ## Who this is for
 
-- Blind and visually impaired viewers, and people building tools for them.
-- Accessibility curators batch-aligning libraries of community AD tracks.
+- Blind and visually impaired viewers, and people building tools for us.
+- Accessibility curators batch-aligning libraries of AD tracks.
 - Archivists pairing older descriptive-audio recordings with modern releases.
 - Anyone who has spent an evening in Audacity nudging timestamps and decided once was enough.
 
@@ -150,6 +150,8 @@ One change per PR if you can, makes review fast.
 
 MIT. See [LICENSE](LICENSE).
 
-## A note on content
+## Credits and a note on content
 
-ADSync doesn't ship, download, or distribute any copyrighted video or audio. It's a local tool that runs against files you already have. The audio description tracks themselves were recorded by volunteers who put in real work, please credit them where you can.
+ADSync doesn't ship, download, or distribute any copyrighted video or audio. It's a local tool that runs against files you already have.
+
+The AD tracks themselves mostly come from [audiovault.net](https://audiovault.net), which hosts a huge library of both real professionally-produced audio description (the tracks originally aired by networks and studios) and community-recorded ones. None of this workflow exists without them. If ADSync is useful to you, go support audiovault, and credit the people who recorded the tracks where you can.
