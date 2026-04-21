@@ -21,24 +21,24 @@ ADSync fixes that. You hand it a video file and an unsynced AD track. It gives y
 - **Archivists** pairing old descriptive-audio recordings with modern releases
 - **Media tinkerers** who want one command instead of an evening of nudging
 
-## What makes this different
+## The approach
 
-Most existing AD-sync tools chop the description into fixed chunks and align each one independently. That works for simple drift, but it falls apart when the cuts don't match: you get audio that skips back and replays the same second, jumps forward, then rewinds when the next chunk disagrees with the last. Stutter loops, phantom repeats, mid-sentence rewinds. Unlistenable for the person who actually needs the narration.
+The older, simpler way to sync an AD track is to chop it into fixed chunks and align each chunk independently, then glue the results back together with crossfades. That's a perfectly reasonable starting point, and it works well when the two sources are close — constant offset or gentle drift. ADSync keeps a mode like that around (`piecewise`) for comparison and for the easy cases.
 
-ADSync refuses to make per-chunk decisions in the first place. Instead:
+Where it gets tricky is when the cuts don't match — different ad breaks, an inserted recap, a trimmed scene. Independent per-chunk decisions can disagree with their neighbours, and once they do, the stitched output can skip or double back on itself. The warp mode in ADSync is an attempt at a different trade-off:
 
 - It builds a **top-K candidate lattice** of plausible offsets across every analysis window
 - Runs a **Viterbi / DP decoder** with explicit penalties on offset jumps and curvature — so the track is solved **globally**, not locally
-- Fits a **shape-preserving monotone PCHIP warp** through the decoded points — guaranteed never to run backwards in time
-- Renders the final audio from a **continuous time-map**, sample by sample — no seams, no re-glueing of chunks
+- Fits a **shape-preserving monotone PCHIP warp** through the decoded points — so the time-map never runs backwards
+- Renders the final audio from a **continuous time-map**, sample by sample — no chunk seams to glue
 
-The outcome: no stutter loops, no backwards audio, no phantom repeats. Either the alignment holds cleanly or the confidence score flags it up front — ADSync won't silently produce a broken mix and hope you don't notice.
+The goal is that either the alignment holds cleanly end-to-end or the confidence score surfaces the problem up front, so you know when to trust the output and when to review it.
 
 ## What you get
 
 - **One-shot sync → mux.** Input two files, output one MKV with the AD embedded as a tagged, selectable track.
 - **Handles the ugly cases.** Constant offset, linear clock drift, *and* discontinuous edits (different ad-break placement, missing scenes, inserted recaps) — all in one pipeline.
-- **Globally-optimised warp alignment.** A Viterbi decoder walks a candidate lattice and fits a shape-preserving monotone warp — so the whole track stays consistent instead of each chunk guessing independently.
+- **Globally-optimised warp alignment.** A Viterbi decoder walks a candidate lattice and fits a shape-preserving monotone warp — so the whole track is solved as one piece rather than chunk-by-chunk.
 - **Sub-sample accuracy.** Parabolic interpolation around cross-correlation peaks gives ~1–3 ms precision.
 - **Fast and honest.** Streams PCM straight into FFmpeg — no huge temp files. Every run produces a confidence score and a warnings list so you know when to trust the output and when to review.
 - **Debug mode that actually helps.** Dumps feature CSVs, plots, and intermediate WAVs when you want to understand what the aligner saw.
@@ -52,9 +52,9 @@ ADSync tries four alignment strategies in order of complexity and uses whichever
 | `offset` | The AD is a clean shift of the video (same cut, different start time) | Single global offset via normalised cross-correlation on downsampled raw audio |
 | `drift` | Both tracks match but sample rates or clocks differ slightly | Measures offset at several points, fits a weighted linear drift model |
 | `warp` *(default fallback)* | Cuts differ — inserted scenes, missing recaps, shifted ad breaks | Builds a top-K candidate lattice per window, runs a DP decoder with jump/curvature penalties + speech-rich bonuses, then fits a shape-preserving PCHIP warp and renders the output from a continuous time-map |
-| `piecewise` *(legacy)* | Present for comparison with the old stitching approach | Anchor search + piecewise map with crossfades |
+| `piecewise` | The classic stitch-and-crossfade approach | Anchor search + piecewise map with crossfades. Kept around for the easy cases and for comparison |
 
-Warp mode is the default when offset/drift aren't enough. It replaces the older piecewise stitcher because a global DP decoder refuses to chase musical false-positives the way per-chunk decisions do.
+Warp mode is the default when offset/drift aren't enough, since solving the time-map globally tends to hold together better than reconciling independent per-chunk decisions after the fact.
 
 ## Installation
 
