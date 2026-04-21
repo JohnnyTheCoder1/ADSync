@@ -1,51 +1,49 @@
 # ADSync
 
-**Fan-made audio description tracks, perfectly aligned with your video — in one command.**
-
-Accessibility should not depend on whether someone happened to rip the right cut. ADSync takes any audio description (AD) track and locks it onto your video file, automatically, even when the two were made from different edits.
-
----
+Sync a community-made audio description track to your copy of a video, and mux them into one MKV. One command.
 
 ## Why this exists
 
-Most streaming services do not ship audio description. Blind and visually impaired viewers rely on community-made AD tracks to actually enjoy what they watch.
+First time I tried to do this, I had VLC open on one screen and Windows Media Player on the other. Play the video, start the AD a few seconds behind, listen, pause, rewind, nudge the AD a second earlier, play again. By the time the first ad break hit, the two were off in a way no single offset would fix. I gave up around minute twelve.
 
-The problem: a fan's AD track was recorded against *their* copy of the episode. Yours is almost never the same cut — different intros, different ad breaks, different frame rates, different anything. Drop the AD on top and by minute ten it is narrating the wrong scene.
+Doing that for one episode is a slow evening. Doing it for a season is a problem. And the people who actually need the audio description, blind and visually impaired viewers, shouldn't have to do any of it in the first place.
 
-ADSync fixes that. You hand it a video file and an unsynced AD track. It gives you back a single MKV with the AD perfectly slotted in as a selectable audio stream. No manual nudging, no Audacity, no spreadsheet of timestamps.
+The reason it's hard: the fan who recorded the AD did it against their copy of the episode, and yours is almost never the same cut. Different intro length, different ad breaks, different frame rate, an inserted recap, the occasional missing scene. Drop the AD on top of a mismatched cut and by minute ten it's narrating the wrong thing.
 
-## Who it is for
+ADSync takes the video and the unsynced AD, does the alignment in one pass, and hands you back an MKV with the AD embedded as a selectable audio stream. If it can't find a confident alignment it tells you instead of quietly producing a broken mix.
 
-- **Blind and visually impaired viewers** — or anyone building tools for them
-- **Accessibility curators** batch-aligning libraries of community AD tracks
-- **Archivists** pairing old descriptive-audio recordings with modern releases
-- **Media tinkerers** who want one command instead of an evening of nudging
+## Who this is for
+
+- Blind and visually impaired viewers, and people building tools for them.
+- Accessibility curators batch-aligning libraries of community AD tracks.
+- Archivists pairing older descriptive-audio recordings with modern releases.
+- Anyone who has spent an evening in Audacity nudging timestamps and decided once was enough.
 
 ## The approach
 
-The older, simpler way to sync an AD track is to chop it into fixed chunks and align each chunk independently, then glue the results back together with crossfades. That's a perfectly reasonable starting point, and it works well when the two sources are close — constant offset or gentle drift. ADSync keeps a mode like that around (`piecewise`) for comparison and for the easy cases.
+The older, simpler way to do this is to chop the AD into fixed chunks, align each chunk independently, and stitch the results back together with crossfades. That works well when the two sources are close, a constant offset or a gentle drift. ADSync keeps a mode like that around (`piecewise`) for the easy cases and for comparison.
 
-Where it gets tricky is when the cuts don't match — different ad breaks, an inserted recap, a trimmed scene. Independent per-chunk decisions can disagree with their neighbours, and once they do, the stitched output can skip or double back on itself. The warp mode in ADSync is an attempt at a different trade-off:
+It gets harder when the cuts don't match: different ad breaks, an inserted recap, a trimmed scene. Independent per-chunk decisions can disagree with their neighbours, and once they do, the stitched output can skip or double back on itself. Warp mode takes a different trade-off:
 
-- It builds a **top-K candidate lattice** of plausible offsets across every analysis window
-- Runs a **Viterbi / DP decoder** with explicit penalties on offset jumps and curvature — so the track is solved **globally**, not locally
-- Fits a **shape-preserving monotone PCHIP warp** through the decoded points — so the time-map never runs backwards
-- Renders the final audio from a **continuous time-map**, sample by sample — no chunk seams to glue
+- Build a top-K candidate lattice of plausible offsets at every analysis window.
+- Run a Viterbi / DP decoder with explicit penalties on offset jumps and curvature, so the whole track gets solved as one piece instead of window-by-window.
+- Fit a shape-preserving monotone PCHIP warp through the decoded points, so the time-map never runs backwards.
+- Render the final audio from that continuous time-map, sample by sample. No chunk seams to glue.
 
-The goal is that either the alignment holds cleanly end-to-end or the confidence score surfaces the problem up front, so you know when to trust the output and when to review it.
+Either the alignment holds end-to-end, or the confidence score flags it up front so you know to review.
 
 ## What you get
 
-- **One-shot sync → mux.** Input two files, output one MKV with the AD embedded as a tagged, selectable track.
-- **Handles the ugly cases.** Constant offset, linear clock drift, *and* discontinuous edits (different ad-break placement, missing scenes, inserted recaps) — all in one pipeline.
-- **Globally-optimised warp alignment.** A Viterbi decoder walks a candidate lattice and fits a shape-preserving monotone warp — so the whole track is solved as one piece rather than chunk-by-chunk.
-- **Sub-sample accuracy.** Parabolic interpolation around cross-correlation peaks gives ~1–3 ms precision.
-- **Fast and honest.** Streams PCM straight into FFmpeg — no huge temp files. Every run produces a confidence score and a warnings list so you know when to trust the output and when to review.
-- **Debug mode that actually helps.** Dumps feature CSVs, plots, and intermediate WAVs when you want to understand what the aligner saw.
+- One command in, one MKV out, with the AD embedded as a tagged, selectable track.
+- Handles constant offset, linear clock drift, and discontinuous edits (ad-break changes, missing scenes, inserted recaps) in the same pipeline.
+- Global warp alignment: a Viterbi decoder walks the candidate lattice and fits a shape-preserving monotone warp, so the whole track is solved as one piece.
+- Sub-sample accuracy via parabolic interpolation around cross-correlation peaks, roughly 1–3 ms.
+- Streams PCM straight into FFmpeg, no huge temp files. Every run produces a confidence score and a warnings list.
+- Debug mode that dumps feature CSVs, plots, and intermediate WAVs when you want to see what the aligner saw.
 
 ## How it works
 
-ADSync tries four alignment strategies in order of complexity and uses whichever earns a high enough confidence score:
+ADSync tries four alignment strategies in order of complexity, and uses whichever one clears the confidence threshold:
 
 | Mode | When it wins | What it does |
 |---|---|---|
@@ -84,7 +82,7 @@ pytest
 adsync sync episode.mkv ad_track.m4a -o episode.with-ad.mkv
 ```
 
-That's it. Open the resulting MKV in VLC, MPV, Plex, Jellyfin — pick the "Audio Description" track and press play.
+That's it. Open the resulting MKV in VLC, MPV, Plex, or Jellyfin, pick the "Audio Description" track, press play.
 
 ## Commands
 
@@ -122,13 +120,13 @@ Run `adsync <command> --help` for the full list.
 
 ## Tested on *From*
 
-ADSync has been used end-to-end on episodes of **From** (the MGM+ horror/mystery series), pairing fan-contributed AD tracks with retail releases. Across the episodes tested so far, sync has held up well — including a case where the AD and video had a genuine edit discontinuity mid-episode, which warp mode correctly handled as a single offset jump rather than trying to force a linear drift fit.
+I've been running this end-to-end on episodes of *From* (the MGM+ horror/mystery series), pairing fan-contributed AD tracks with retail releases. Sync has held up on everything I've tried so far, including one episode where the AD and video had a real edit discontinuity mid-way through. Warp mode handled that as a single offset jump instead of trying to force a linear drift fit across it.
 
 If you have the tracks, it works.
 
 ## Known artifacts
 
-- **Very brief pitch drift (~a few seconds, self-correcting).** Occasionally you can hear the narration's pitch shift slightly before snapping back. This is a side effect of time-warping the AD to match the video timeline. On the roadmap to fix shortly — likely by swapping the inner resampler for a phase-vocoder / WSOLA path so stretch doesn't touch pitch.
+- Occasional brief pitch drift, a few seconds long and self-correcting. You can sometimes hear the narration's pitch shift slightly before snapping back. It's a side effect of time-warping the AD to match the video timeline. On the list to fix, probably by swapping the inner resampler for a phase-vocoder or WSOLA path so stretch doesn't touch pitch.
 
 ## Roadmap
 
@@ -140,13 +138,13 @@ If you have the tracks, it works.
 
 ## Contributing
 
-Issues and PRs welcome, especially:
+Issues and PRs welcome. A few things that are especially useful:
 
-- Bug reports with a JSON report attached (from `adsync analyze`)
-- Hard cases — tracks that come out wrong (even if you can only describe the source material, not share it)
-- Improvements to the warp decoder penalties, confidence model, or rendering
+- Bug reports with a JSON report attached (from `adsync analyze`).
+- Hard cases. Tracks that come out wrong, even if all you can do is describe the source material rather than share it.
+- Improvements to the warp decoder penalties, the confidence model, or the rendering path.
 
-Please keep PRs focused. One change per PR makes review fast.
+One change per PR if you can, makes review fast.
 
 ## License
 
@@ -154,4 +152,4 @@ MIT. See [LICENSE](LICENSE).
 
 ## A note on content
 
-ADSync does not ship, download, or distribute any copyrighted video or audio. It is a local tool that operates on files you already have. Audio description tracks were created by dedicated volunteers — please credit them where you can.
+ADSync doesn't ship, download, or distribute any copyrighted video or audio. It's a local tool that runs against files you already have. The audio description tracks themselves were recorded by volunteers who put in real work, please credit them where you can.
