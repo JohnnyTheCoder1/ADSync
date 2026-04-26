@@ -33,27 +33,29 @@ def mux_ad_track(
     """Mux original video with AD audio encoded directly into the MKV.
 
     Streams raw PCM in chunks to FFmpeg via stdin — never materialises the
-    full byte array.  Uses Opus by default (much faster than AAC for speech).
+    full byte array.  Channel count is inferred from *synced_y* (1-D = mono,
+    2-D = (channels, samples)).  Uses Opus by default.
     """
     video_path = Path(video_path)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    if synced_y.ndim == 1:
+        n_channels = 1
+        total_samples = len(synced_y)
+    else:
+        n_channels, total_samples = synced_y.shape
+
     n_audio = n_existing_audio if n_existing_audio is not None else _count_audio_streams(video_path)
 
     args = [
-        # Input 0: original video file
         "-i", str(video_path),
-        # Input 1: raw PCM from stdin
-        "-f", "s16le", "-ar", str(sr), "-ac", "1", "-i", "pipe:0",
-        # Map all streams from video + AD audio from pipe
+        "-f", "s16le", "-ar", str(sr), "-ac", str(n_channels), "-i", "pipe:0",
         "-map", "0",
         "-map", "1:a:0",
-        # Copy all existing streams, encode only the new AD track
         "-c", "copy",
         f"-c:a:{n_audio}", codec,
         f"-b:a:{n_audio}", bitrate,
-        # Metadata for the AD track
         f"-metadata:s:a:{n_audio}", f"language={language}",
         f"-metadata:s:a:{n_audio}", f"title={title}",
         str(output_path),
@@ -62,7 +64,6 @@ def mux_ad_track(
     proc = run_ffmpeg_streamed(args)
     assert proc.stdin is not None
 
-    # Drain stderr in a background thread to prevent pipe deadlock on Windows
     stderr_buf: list[bytes] = []
     def _drain_stderr() -> None:
         if proc.stderr:
@@ -72,7 +73,7 @@ def mux_ad_track(
 
     from rich.progress import Progress, BarColumn, TimeRemainingColumn
 
-    total_chunks = (len(synced_y) + _CHUNK_SAMPLES - 1) // _CHUNK_SAMPLES
+    total_chunks = (total_samples + _CHUNK_SAMPLES - 1) // _CHUNK_SAMPLES
 
     with Progress(
         "[progress.description]{task.description}",
@@ -82,10 +83,13 @@ def mux_ad_track(
         transient=True,
     ) as progress:
         task = progress.add_task("Encoding AD track", total=total_chunks)
-        for start in range(0, len(synced_y), _CHUNK_SAMPLES):
-            chunk = synced_y[start : start + _CHUNK_SAMPLES]
+        for start in range(0, total_samples, _CHUNK_SAMPLES):
+            chunk = synced_y[..., start : start + _CHUNK_SAMPLES]
             pcm = np.clip(chunk, -1.0, 1.0)
-            proc.stdin.write((pcm * 32767).astype(np.int16).tobytes())
+            pcm = (pcm * 32767).astype(np.int16)
+            if pcm.ndim == 2:
+                pcm = np.ascontiguousarray(pcm.T)
+            proc.stdin.write(pcm.tobytes())
             progress.advance(task)
 
     proc.stdin.close()

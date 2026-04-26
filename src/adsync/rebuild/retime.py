@@ -21,26 +21,27 @@ def retime_segment(
 ) -> NDArray[np.float32]:
     """Cut [src_start, src_end] from *y* and resample to seg.stretch ratio.
 
-    Linear interpolation in 30-second blocks so memory stays bounded on
-    full-length films.  At typical stretch values (0.99–1.01) the resulting
-    pitch shift (~17 cents) is imperceptible.
+    Accepts 1-D (mono) or 2-D (channels, samples) input and returns the same
+    layout.  Linear interpolation in 30-second blocks keeps memory bounded
+    on full-length films.  At typical stretch values (0.99–1.01) the ~17-cent
+    pitch shift is imperceptible.
 
     Returns an owned float32 array — the caller is free to mutate it.
     """
     start_sample = int(seg.src_start * sr)
     end_sample = int(seg.src_end * sr)
-    src = y[start_sample:end_sample]
-    src_len = len(src)
+    src = y[..., start_sample:end_sample]
+    src_len = src.shape[-1]
 
     if src_len == 0:
-        return np.zeros(0, dtype=np.float32)
+        return _empty_like(y, 0)
 
     if abs(seg.stretch - 1.0) <= 1e-6:
         return src.astype(np.float32, copy=True)
 
     target_len = int(src_len * seg.stretch)
     if target_len == 0:
-        return np.zeros(0, dtype=np.float32)
+        return _empty_like(y, 0)
 
     log.debug(
         "Resampling [%.1f–%.1f] stretch=%.6f (%d → %d samples)",
@@ -48,7 +49,7 @@ def retime_segment(
     )
 
     src = np.ascontiguousarray(src, dtype=np.float32)
-    out = np.empty(target_len, dtype=np.float32)
+    out = _empty_like(y, target_len)
     scale = (src_len - 1) / max(target_len - 1, 1)
     block = sr * _BLOCK_SECONDS
 
@@ -61,9 +62,16 @@ def retime_segment(
         np.clip(idx, 0, src_len - 2, out=idx)
         np.subtract(pos, idx, out=pos)
         frac = pos.astype(np.float32)
-        chunk = out[start:end]
-        np.multiply(src[idx], 1.0 - frac, out=chunk)
+        chunk = out[..., start:end]
+        np.multiply(src[..., idx], 1.0 - frac, out=chunk)
         idx += 1
-        chunk += src[idx] * frac
+        chunk += src[..., idx] * frac
 
     return out
+
+
+def _empty_like(y: NDArray[np.floating], n: int) -> NDArray[np.float32]:
+    if y.ndim == 1:
+        return np.zeros(n, dtype=np.float32) if n == 0 else np.empty(n, dtype=np.float32)
+    shape = (y.shape[0], n)
+    return np.zeros(shape, dtype=np.float32) if n == 0 else np.empty(shape, dtype=np.float32)

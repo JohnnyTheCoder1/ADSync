@@ -75,7 +75,7 @@ def run_pipeline(
             futures = [
                 pool.submit(extract_audio, video_info, vid_wav, sr=config.analysis_sr, mono=config.mono),
                 pool.submit(extract_audio, ad_info, ad_wav, sr=config.analysis_sr, mono=config.mono),
-                pool.submit(extract_audio, ad_info, ad_hq_wav, sr=ad_hq_sr, mono=True),
+                pool.submit(extract_audio, ad_info, ad_hq_wav, sr=ad_hq_sr, mono=False),
             ]
             for f in as_completed(futures):
                 f.result()
@@ -284,7 +284,7 @@ def run_pipeline(
 
         if mux or debug_dir:
             log.info("Step 9/12: Rebuilding synced AD track (HQ)")
-            y_ad_hq, hq_sr = load_wav(ad_hq_wav, sr=ad_hq_sr, mono=True)
+            y_ad_hq, hq_sr = load_wav(ad_hq_wav, sr=ad_hq_sr, mono=False)
             hq_video_duration = video_duration
 
             if mode == "warp" and warp_fns is not None:
