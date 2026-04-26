@@ -272,6 +272,12 @@ def run_pipeline(
             warp_path=warp_path_result,
         )
 
+        # Drop the analysis-rate audio (and features, unless we'll plot them)
+        # before loading the HQ AD — keeps peak RSS down on long films.
+        del y_vid, y_ad
+        if not debug_dir:
+            del vid_feat, ad_feat
+
         # ── Step 9: Rebuild ──────────────────────────────────────────────
         synced_y = None
         hq_sr = None
