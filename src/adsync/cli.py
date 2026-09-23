@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+import logging
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
@@ -11,7 +13,9 @@ from rich.console import Console
 
 from adsync import __version__
 from adsync.config import SyncConfig
+from adsync.compute import CudaBackendError
 from adsync.logging import setup_logging
+from adsync.media.output import OutputPublicationError, resolve_output_path, validate_output_path
 
 app = typer.Typer(
     name="adsync",
@@ -20,6 +24,12 @@ app = typer.Typer(
     rich_markup_mode="rich",
 )
 console = Console()
+
+
+class Device(str, Enum):
+    auto = "auto"
+    cpu = "cpu"
+    cuda = "cuda"
 
 
 # ── Shared options ───────────────────────────────────────────────────────────
@@ -56,6 +66,7 @@ def sync(
     video: Path = typer.Argument(..., help="Video file (e.g. episode.mkv)"),
     ad_audio: Path = typer.Argument(..., help="Audio description file (e.g. ad_track.m4a)"),
     output: Path = typer.Option(None, "-o", "--output", help="Output MKV path"),
+    output_dir: Optional[Path] = typer.Option(None, "--output-dir", envvar="ADSYNC_OUTPUT_DIR", help="Destination folder, including a shared/UNC folder; -o takes precedence"),
     report: Optional[Path] = typer.Option(None, "--report", help="Write JSON report"),
     keep_temp: bool = typer.Option(False, "--keep-temp"),
     debug_dir: Optional[Path] = typer.Option(None, "--debug-dir"),
@@ -66,6 +77,8 @@ def sync(
     crossfade_ms: int = typer.Option(80, "--crossfade-ms"),
     analysis_sr: int = typer.Option(16000, "--analysis-sr"),
     mode: str = typer.Option("auto", "--mode", help="auto|offset|drift|piecewise|warp"),
+    device: Device = typer.Option(Device.auto, "--device", envvar="ADSYNC_DEVICE", help="Correlation device: auto, cpu, cuda"),
+    threads: Optional[int] = typer.Option(None, "--threads", min=1, envvar="ADSYNC_THREADS", help="CPU thread budget for this run"),
     offset_adjust: float = typer.Option(0.0, "--offset-adjust", help="Manual offset tweak in seconds (positive = push AD later)"),
     codec: str = typer.Option("libopus", "--codec", help="Audio codec for AD track (libopus, aac, etc.)"),
     bitrate: str = typer.Option("96k", "--bitrate", help="Bitrate for AD track (e.g. 96k, 128k)"),
@@ -82,10 +95,12 @@ def sync(
     """Full sync pipeline — produces synced MKV output."""
     _validate_inputs(video, ad_audio)
 
-    if output is None:
-        output = video.with_suffix(".synced.mkv")
+    output = resolve_output_path(video, output, output_dir)
+    _validate_output(output, video, ad_audio)
 
     config = SyncConfig(
+        device=device.value,
+        threads=threads,
         analysis_sr=analysis_sr,
         confidence_threshold=confidence_threshold,
         max_stretch=max_stretch,
@@ -109,16 +124,20 @@ def sync(
 
     from adsync._pipeline import run_pipeline
 
-    result = run_pipeline(
-        video_path=video,
-        ad_path=ad_audio,
-        output_path=output,
-        config=config,
-        report_path=report,
-        debug_dir=debug_dir,
-        keep_temp=keep_temp,
-        mux=True,
-    )
+    try:
+        result = run_pipeline(
+            video_path=video,
+            ad_path=ad_audio,
+            output_path=output,
+            config=config,
+            report_path=report,
+            debug_dir=debug_dir,
+            keep_temp=keep_temp,
+            mux=True,
+        )
+    except (OutputPublicationError, CudaBackendError, ValueError) as exc:
+        console.print(f"Error: {exc}", markup=False)
+        raise typer.Exit(2)
 
     raise typer.Exit(0 if result.confidence >= config.confidence_threshold else 1)
 
@@ -130,6 +149,7 @@ def sync(
 def prep(
     video: Path = typer.Argument(..., help="Source video (e.g. movie.mkv)"),
     output: Path = typer.Option(None, "-o", "--output", help="Output path (default: <name>.prepped.mkv)"),
+    output_dir: Optional[Path] = typer.Option(None, "--output-dir", envvar="ADSYNC_OUTPUT_DIR", help="Destination folder, including a shared/UNC folder; -o takes precedence"),
     language: str = typer.Option("eng", "--language", "-l", help="Audio language to keep"),
     audio_index: Optional[int] = typer.Option(None, "--audio-index", help="Keep this exact audio stream index (overrides --language)"),
     codec: str = typer.Option("libopus", "--codec", help="Encoder when downmixing (libopus ~4x faster than aac)"),
@@ -143,6 +163,8 @@ def prep(
     downmixed with a dialog-forward formula and a true-peak limiter.
     """
     _validate_inputs(video)
+    output = resolve_output_path(video, output, output_dir, suffix=".prepped.mkv")
+    _validate_output(output, video)
 
     from adsync.media.prep import prep_video
 
@@ -158,7 +180,7 @@ def prep(
         state["last"] = now
         pct = min(100.0, 100.0 * done / total)
         eta = (total - done) / speed if speed > 0 else 0.0
-        console.print(
+        logging.getLogger("adsync").info(
             f"  prep {pct:3.0f}%  ({_mmss(done)} / {_mmss(total)})  "
             f"{speed:.0f}x realtime  eta {_mmss(eta)}"
         )
@@ -173,8 +195,8 @@ def prep(
             limiter=not no_limiter,
             on_progress=_print_progress,
         )
-    except ValueError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+    except (OutputPublicationError, ValueError) as exc:
+        console.print(f"Error: {exc}", markup=False)
         raise typer.Exit(2)
 
     console.print(
@@ -199,16 +221,18 @@ def analyze(
     ad_audio: Path = typer.Argument(..., help="Audio description file"),
     report: Path = typer.Option("report.json", "--report"),
     mode: str = typer.Option("auto", "--mode"),
+    device: Device = typer.Option(Device.auto, "--device", envvar="ADSYNC_DEVICE", help="Correlation device: auto, cpu, cuda"),
+    threads: Optional[int] = typer.Option(None, "--threads", min=1, envvar="ADSYNC_THREADS", help="CPU thread budget for this run"),
     analysis_sr: int = typer.Option(16000, "--analysis-sr"),
 ) -> None:
     """Run analysis only — no final mux."""
     _validate_inputs(video, ad_audio)
 
-    config = SyncConfig(analysis_sr=analysis_sr, mode=mode)
+    config = SyncConfig(analysis_sr=analysis_sr, mode=mode, device=device.value, threads=threads)
 
     from adsync._pipeline import run_pipeline
 
-    run_pipeline(
+    _run_analysis(
         video_path=video,
         ad_path=ad_audio,
         output_path=None,
@@ -229,16 +253,18 @@ def debug(
     ad_audio: Path = typer.Argument(..., help="Audio description file"),
     workdir: Path = typer.Option("debug_out", "--workdir"),
     mode: str = typer.Option("auto", "--mode"),
+    device: Device = typer.Option(Device.auto, "--device", envvar="ADSYNC_DEVICE", help="Correlation device: auto, cpu, cuda"),
+    threads: Optional[int] = typer.Option(None, "--threads", min=1, envvar="ADSYNC_THREADS", help="CPU thread budget for this run"),
     analysis_sr: int = typer.Option(16000, "--analysis-sr"),
 ) -> None:
     """Analysis + dump intermediates (WAVs, plots, anchors, segment maps)."""
     _validate_inputs(video, ad_audio)
 
-    config = SyncConfig(analysis_sr=analysis_sr, mode=mode)
+    config = SyncConfig(analysis_sr=analysis_sr, mode=mode, device=device.value, threads=threads)
 
     from adsync._pipeline import run_pipeline
 
-    run_pipeline(
+    _run_analysis(
         video_path=video,
         ad_path=ad_audio,
         output_path=None,
@@ -258,22 +284,63 @@ def mux(
     video: Path = typer.Argument(..., help="Video file"),
     ad_audio: Path = typer.Argument(..., help="Already-synced AD audio file"),
     output: Path = typer.Option(None, "-o", "--output"),
+    output_dir: Optional[Path] = typer.Option(None, "--output-dir", envvar="ADSYNC_OUTPUT_DIR", help="Destination folder, including a shared/UNC folder; -o takes precedence"),
     language: str = typer.Option("eng", "--language"),
     ad_title: str = typer.Option("Audio Description", "--ad-title"),
 ) -> None:
     """Mux a pre-synced AD track into the video container."""
     _validate_inputs(video, ad_audio)
 
-    if output is None:
-        output = video.with_suffix(".synced.mkv")
+    output = resolve_output_path(video, output, output_dir)
+    _validate_output(output, video, ad_audio)
 
     from adsync.media.mux import mux_ad_file
 
-    mux_ad_file(video, ad_audio, output, language=language, title=ad_title)
+    try:
+        mux_ad_file(video, ad_audio, output, language=language, title=ad_title)
+    except (OutputPublicationError, ValueError) as exc:
+        console.print(f"Error: {exc}", markup=False)
+        raise typer.Exit(2)
     console.print(f"[green]Muxed → {output}[/green]")
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
+
+@app.command()
+def devices() -> None:
+    """Inspect CPU/RAM and verify CUDA with an actual FFT and normalization."""
+    from adsync.hardware import detect_hardware
+    profile = detect_hardware()
+    gib = 1024 ** 3
+    console.print(f"CPU: {profile.physical_cpus} physical cores, {profile.usable_cpus} usable logical CPUs", markup=False)
+    console.print(f"RAM: {profile.available_memory_bytes / gib:.1f} GiB available / {profile.total_memory_bytes / gib:.1f} GiB total", markup=False)
+    if profile.cuda_available:
+        console.print(f"GPU: {profile.gpu_name}", markup=False)
+        if profile.gpu_free_bytes is not None:
+            console.print(f"VRAM: {profile.gpu_free_bytes / gib:.1f} GiB free", markup=False)
+        console.print("CUDA float64 FFT and normalization check passed.")
+    else:
+        console.print(f"CUDA unavailable: {profile.cuda_error}", markup=False)
+        console.print("CPU processing is available.")
+
+
+def _run_analysis(**kwargs):
+    from adsync._pipeline import run_pipeline
+    try:
+        result = run_pipeline(**kwargs)
+    except (CudaBackendError, ValueError) as exc:
+        console.print(f"Error: {exc}", markup=False)
+        raise typer.Exit(2)
+    raise typer.Exit(0 if result.confidence >= kwargs["config"].confidence_threshold else 1)
+
+
+def _validate_output(output: Path, *inputs: Path) -> None:
+    try:
+        validate_output_path(output, inputs)
+    except ValueError as exc:
+        console.print(f"Error: {exc}", markup=False)
+        raise typer.Exit(2)
 
 
 def _validate_inputs(*paths: Path) -> None:
@@ -281,6 +348,10 @@ def _validate_inputs(*paths: Path) -> None:
         if not p.exists():
             console.print(f"[red]Error:[/red] File not found: {p}")
             raise typer.Exit(2)
+
+
+from adsync.batch.cli import season
+app.command()(season)
 
 
 if __name__ == "__main__":

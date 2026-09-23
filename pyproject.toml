@@ -18,12 +18,17 @@ dependencies = [
     "soundfile>=0.12,<1.0",
     "rich>=13.0,<14.0",
     "matplotlib>=3.7,<4.0",
+    "psutil>=5.9,<8.0",
+    "threadpoolctl>=3.0,<4.0",
 ]
 
 [project.scripts]
 adsync = "adsync.cli:app"
 
 [project.optional-dependencies]
+cuda = [
+    "cupy-cuda12x[ctk]>=14,<15",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",

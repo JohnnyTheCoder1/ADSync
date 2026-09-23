@@ -63,7 +63,7 @@ def probe(path: str | Path) -> MediaInfo:
         audio_streams=audio_streams,
     )
     log.info(
-        "Probed [bold]%s[/bold]: %.1f s, %d video, %d audio",
+        "Probed %s: %.1f s, %d video, %d audio",
         path.name,
         info.duration or 0,
         len(video_streams),

@@ -10,8 +10,8 @@ import logging
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.signal import fftconvolve
 
+from adsync.compute import CorrelationBackend
 from adsync.models import FeatureBundle
 
 log = logging.getLogger("adsync")
@@ -25,6 +25,7 @@ def estimate_global_offset(
     y_vid: NDArray | None = None,
     y_ad: NDArray | None = None,
     sr: int = 16000,
+    compute: CorrelationBackend | None = None,
 ) -> tuple[float, float, list[float]]:
     """Estimate a single global offset (seconds) and a confidence score.
 
@@ -39,12 +40,13 @@ def estimate_global_offset(
     Falls back to onset features if raw audio is not available.
     """
     hop = video_features.hop_length
+    compute = compute if compute is not None else CorrelationBackend("cpu")
     feat_sr = video_features.sr
     sec_per_frame = hop / feat_sr
 
     if y_vid is not None and y_ad is not None:
         offset_sec, best_score, window_offsets = _raw_audio_offset(
-            y_vid, y_ad, sr, max_offset_sec,
+            y_vid, y_ad, sr, max_offset_sec, compute=compute,
         )
         # Verify with onset features at the detected offset
         vid_onset = video_features.onset.astype(np.float64)
@@ -62,7 +64,7 @@ def estimate_global_offset(
         vid_onset = _znorm(vid_onset)
         ad_onset = _znorm(ad_onset)
         max_lag = int(max_offset_sec / sec_per_frame)
-        corr = _norm_cross_correlation(vid_onset, ad_onset, max_lag)
+        corr = _norm_cross_correlation(vid_onset, ad_onset, max_lag, compute=compute)
         best_lag = int(np.argmax(corr)) - max_lag
         best_score = float(corr[best_lag + max_lag])
         offset_sec = best_lag * sec_per_frame
@@ -85,6 +87,8 @@ def _raw_audio_offset(
     y_ad: NDArray,
     sr: int,
     max_offset_sec: float,
+    *,
+    compute: CorrelationBackend | None = None,
 ) -> tuple[float, float, list[float]]:
     """Find offset using multi-window normalized cross-correlation at full SR.
 
@@ -93,6 +97,7 @@ def _raw_audio_offset(
     energy normalization and FFT-based convolution for speed.
     """
     win_sec = 30.0
+    compute = compute if compute is not None else CorrelationBackend("cpu")
     n_windows = 5
     win = int(win_sec * sr)
 
@@ -124,19 +129,12 @@ def _raw_audio_offset(
         a_region = y_ad[a_start:a_end].astype(np.float64)
         a_region -= np.mean(a_region)
 
-        # FFT-based sliding cross-correlation
-        raw_corr = fftconvolve(a_region, v_seg[::-1], mode="valid")
-        npos = len(raw_corr)
-        if npos == 0:
+        # FFT and per-position energy normalization share one device transfer.
+        norm_corr = compute.normalized_correlation(
+            a_region, v_seg, template_energy=v_energy,
+        )
+        if len(norm_corr) == 0:
             continue
-
-        # Per-position energy normalization (critical for accuracy)
-        a_sq = a_region ** 2
-        cs = np.empty(len(a_sq) + 1, dtype=np.float64)
-        cs[0] = 0.0
-        np.cumsum(a_sq, out=cs[1:])
-        a_norms = np.sqrt(np.maximum(cs[win:win + npos] - cs[:npos], 1e-20))
-        norm_corr = raw_corr / (v_energy * a_norms)
 
         peak_idx = int(np.argmax(norm_corr))
         score = float(norm_corr[peak_idx])
@@ -225,13 +223,16 @@ def _znorm(x: NDArray) -> NDArray:
     return (x - np.mean(x)) / std
 
 
-def _norm_cross_correlation(a: NDArray, b: NDArray, max_lag: int) -> NDArray:
+def _norm_cross_correlation(
+    a: NDArray, b: NDArray, max_lag: int, *, compute: CorrelationBackend | None = None,
+) -> NDArray:
     """Normalised cross-correlation over [-max_lag, +max_lag]."""
     n = min(len(a), len(b))
     a = a[:n]
     b = b[:n]
 
-    full_corr = fftconvolve(a, b[::-1], mode="full")
+    compute = compute if compute is not None else CorrelationBackend("cpu")
+    full_corr = compute.fftconvolve(a, b[::-1], mode="full")
     # The zero-lag position in 'full' mode is at index len(b)-1
     center = len(b) - 1
     start = max(center - max_lag, 0)

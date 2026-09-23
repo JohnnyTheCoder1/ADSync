@@ -20,6 +20,7 @@ def extract_audio(
     mono: bool = True,
     speed_ratio: float | None = None,
     sample_fmt: str = "s16",
+    threads: int | None = None,
 ) -> Path:
     """Extract an audio stream to a standardized WAV file.
 
@@ -72,7 +73,7 @@ def extract_audio(
         str(output_path),
     ]
 
-    run_ffmpeg(args)
+    run_ffmpeg(args, threads=threads)
     log.info(
         "Extracted audio → %s (%d Hz, %s%s)",
         output_path.name, sr, "mono" if mono else "stereo",

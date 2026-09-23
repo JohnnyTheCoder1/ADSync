@@ -122,6 +122,16 @@ class SegmentMap(BaseModel):
 class SyncReport(BaseModel):
     mode: str
     confidence: float
+    timing_debug: dict[str, Any] = Field(default_factory=dict)
+    identity_check: dict[str, Any] = Field(default_factory=dict)
+    quality_check: dict[str, Any] = Field(default_factory=dict)
+    compute_requested: str = "cpu"
+    compute_backend: str = "cpu"
+    compute_device: str | None = None
+    compute_fallback_reason: str | None = None
+    gpu_correlations: int = 0
+    cpu_correlations: int = 0
+    offset_adjust: float = 0.0
     global_offset: float | None = None
     drift_ppm: float | None = None
     anchors: list[Anchor] = Field(default_factory=list)

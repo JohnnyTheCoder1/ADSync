@@ -33,6 +33,13 @@ def print_summary(report: SyncReport) -> None:
 
     table.add_row("Mode", report.mode)
     table.add_row("Confidence", f"{report.confidence:.2%}")
+    if report.identity_check:
+        table.add_row("Content identity", report.identity_check.get("status", "unknown"))
+    if report.quality_check:
+        table.add_row("Local output checks", report.quality_check.get("status", "unknown"))
+    table.add_row("Compute", f"{report.compute_backend} ({report.gpu_correlations} GPU, {report.cpu_correlations} CPU correlations)")
+    if report.compute_device:
+        table.add_row("GPU", report.compute_device)
 
     if report.speed_stretch is not None:
         table.add_row(
@@ -87,7 +94,7 @@ def print_summary(report: SyncReport) -> None:
     # Confidence interpretation
     console.print()
     if report.confidence >= 0.90:
-        console.print("[bold green]High confidence — output should be reliable[/bold green]")
+        console.print("[bold green]High alignment confidence[/bold green]")
     elif report.confidence >= 0.75:
         console.print("[bold yellow]Medium confidence — review recommended[/bold yellow]")
     else:

@@ -9,11 +9,14 @@ offset instead of chasing false local correlation peaks.
 from __future__ import annotations
 
 import logging
-from typing import Callable
+from typing import Callable, TYPE_CHECKING
 
 import numpy as np
 
 from adsync.models import CandidateWindow, WarpPoint
+
+if TYPE_CHECKING:
+    from adsync.align.fingerprint import TerminalSupport
 
 log = logging.getLogger("adsync")
 
@@ -58,7 +61,8 @@ def decode_warp_path(
     drift_hint_ppm: float | None = None,
     offset_hint: float | None = None,
     offset_hint_fn: Callable[[float], float] | None = None,
-) -> list[WarpPoint]:
+    terminal_support: list[TerminalSupport] | None = None,
+) -> tuple[list[WarpPoint], float]:
     """Run Viterbi over the candidate lattice and return the decoded path.
 
     Parameters
@@ -247,6 +251,17 @@ def decode_warp_path(
             target_time=target_time,
             confidence=confidence,
         ))
+
+    # Waveform-confirmed terminal landmarks independently constrain these
+    # pieces even when two closing windows cannot pay the DP jump penalty.
+    # Keep the measured support times, including when the scan grid misses a
+    # one-second closing fragment entirely.
+    for support in terminal_support or []:
+        points = [p for p in points if p.source_time < support.boundary]
+        points.extend(WarpPoint(source_time=t, target_time=t + support.offset,
+                                confidence=0.8)
+                      for t in (support.first_time, support.last_time))
+    points.sort(key=lambda p: p.source_time)
 
     mean_conf = float(np.mean([p.confidence for p in points])) if points else 0.0
     log.info(

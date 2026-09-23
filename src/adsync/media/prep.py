@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Callable
 
 from adsync.models import MediaInfo, StreamInfo
+from adsync.media.output import staged_output, validate_output_path
 from adsync.utils.subprocesses import FFmpegError, _find_binary
 
 log = logging.getLogger("adsync")
@@ -219,6 +220,7 @@ def prep_video(
     if output_path is None:
         output_path = video_path.parent / (video_path.stem + ".prepped.mkv")
     output_path = Path(output_path)
+    validate_output_path(output_path, inputs=[video_path])
 
     info = probe(video_path)
     total_sec = info.duration or 0.0
@@ -273,16 +275,18 @@ def prep_video(
     ]
 
     t0 = time.monotonic()
-    _run_ffmpeg_with_progress(args, total_sec, on_progress)
-    elapsed = time.monotonic() - t0
+    with staged_output(output_path, inputs=[video_path]) as local_path:
+        args[-1] = str(local_path)
+        _run_ffmpeg_with_progress(args, total_sec, on_progress)
 
-    # Sanity: the output should exist and cover the source duration.
-    out_info = probe(output_path)
-    if total_sec and out_info.duration and abs(out_info.duration - total_sec) > 5.0:
-        log.warning(
-            "Prepped duration %.1f s differs from source %.1f s — check the output",
-            out_info.duration, total_sec,
-        )
+        # Probe before publication, while failures can still preserve the old file.
+        out_info = probe(local_path)
+        if total_sec and out_info.duration and abs(out_info.duration - total_sec) > 5.0:
+            log.warning(
+                "Prepped duration %.1f s differs from source %.1f s — check the output",
+                out_info.duration, total_sec,
+            )
+    elapsed = time.monotonic() - t0
 
     log.info(
         "Prepped → %s  (%.0f s, %.0fx realtime, audio=%s)",
@@ -332,20 +336,29 @@ def _run_ffmpeg_with_progress(
 
     done_sec = 0.0
     speed = 0.0
-    for line in proc.stdout:
-        key, _, value = line.strip().partition("=")
-        if key == "out_time_us" and value.lstrip("-").isdigit():
-            done_sec = max(done_sec, int(value) / 1e6)
-        elif key == "speed":
-            try:
-                speed = float(value.rstrip("x"))
-            except ValueError:
-                pass
-        elif key == "progress":
-            if on_progress is not None:
-                on_progress(done_sec, total_sec, speed)
-
-    proc.wait()
-    drain.join()
+    try:
+        for line in proc.stdout:
+            key, _, value = line.strip().partition("=")
+            if key == "out_time_us" and value.lstrip("-").isdigit():
+                done_sec = max(done_sec, int(value) / 1e6)
+            elif key == "speed":
+                try:
+                    speed = float(value.rstrip("x"))
+                except ValueError:
+                    pass
+            elif key == "progress":
+                if on_progress is not None:
+                    on_progress(done_sec, total_sec, speed)
+        proc.wait()
+    finally:
+        # Callback errors and Ctrl+C must release the output before the staging
+        # context cleans up. Closing stdout alone can leave the encoder alive.
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        drain.join()
+        proc.stdout.close()
+        if proc.stderr is not None:
+            proc.stderr.close()
     if proc.returncode != 0:
         raise FFmpegError(proc.returncode, "".join(stderr_buf))

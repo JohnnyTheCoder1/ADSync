@@ -204,6 +204,7 @@ def run_scenario(
     workdir: Path,
     dur: float,
     base_offset: float = 0.0,
+    device: str = "auto",
 ) -> ScenarioResult:
     res = ScenarioResult(name=sc.name)
     variant = workdir / f"ad_{sc.name}.wav"
@@ -224,7 +225,7 @@ def run_scenario(
             video_path=video_path,
             ad_path=variant,
             output_path=None,
-            config=SyncConfig(),
+            config=SyncConfig(device=device),
             report_path=report_path,
             debug_dir=None,
             keep_temp=False,
@@ -287,6 +288,7 @@ def main() -> None:
     ap.add_argument("--workdir", required=True, type=Path)
     ap.add_argument("--scenarios", nargs="*", help="Subset of scenario names")
     ap.add_argument("--json-out", type=Path, help="Write results JSON here")
+    ap.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     args = ap.parse_args()
 
     args.workdir.mkdir(parents=True, exist_ok=True)
@@ -309,7 +311,7 @@ def main() -> None:
     base_offset = 0.0
     for sc in scenarios:
         print(f"── {sc.name}: {sc.description}")
-        res = run_scenario(sc, args.video, args.ad, args.workdir, dur, base_offset)
+        res = run_scenario(sc, args.video, args.ad, args.workdir, dur, base_offset, args.device)
         if sc.name == "clean" and not res.error and abs(res.global_offset) < 0.5:
             base_offset = res.global_offset
             print(f"   base-pair offset calibrated: {base_offset:+.4f} s")

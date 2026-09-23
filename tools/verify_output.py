@@ -1,44 +1,42 @@
-"""Output-side QC: fingerprint the muxed AD track against the film audio.
-
-Extracts both audio tracks from a finished AD.mkv and landmark-matches them.
-If the render is correct, every span sits at offset ~0.000 s.
-"""
+"""Verify rendered AD locally before publication; retain calibrated QC evidence."""
 
 from __future__ import annotations
 
-import subprocess
+import argparse
+import json
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import numpy as np
+from adsync.batch.runner import atomic_json
+from adsync.hardware import thread_budget
+from adsync.quality import verify_media_sync, verify_video_preservation
 
-from adsync.align.fingerprint import fingerprint_align
-from adsync.features.load import load_wav
 
-mkv = Path(sys.argv[1])
-with tempfile.TemporaryDirectory() as td:
-    film = Path(td) / "film.wav"
-    ad = Path(td) / "ad.wav"
-    for stream, out in (("a:0", film), ("a:1", ad)):
-        subprocess.run(
-            ["ffmpeg", "-hide_banner", "-v", "error", "-y", "-i", str(mkv),
-             "-map", f"0:{stream}", "-ac", "1", "-ar", "16000", str(out)],
-            check=True,
-        )
-    y_film, sr = load_wav(film, sr=16000)
-    y_ad, _ = load_wav(ad, sr=16000)
-    fp = fingerprint_align(y_film, y_ad, sr)
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("media", type=Path)
+    parser.add_argument("--sync-report", type=Path, help="Saved pipeline report; targets edits and sparse fitted intervals")
+    parser.add_argument("--report", type=Path, help="Destination for detailed QC JSON (default beside media)")
+    parser.add_argument("--source-video", type=Path, help="Also compare every compressed video stream SHA256")
+    parser.add_argument("--work-dir", type=Path)
+    parser.add_argument("--threads", type=int, default=2)
+    args = parser.parse_args(argv)
+    report = json.loads(args.sync_report.read_text(encoding="utf-8")) if args.sync_report else None
+    with thread_budget(args.threads):
+        result = verify_media_sync(args.media, work_dir=args.work_dir, report=report)
+        if args.source_video:
+            result["video_preservation"] = verify_video_preservation(args.source_video, args.media)
+            if result["video_preservation"]["status"] != "pass":
+                result["status"] = "fail"
+    destination = args.report or args.media.with_suffix(".qc.json")
+    atomic_json(destination, result)
+    print(f"QC {result['status']}: {destination}")
+    print(f"{len(result['windows'])} local windows; {len(result['failures'])} timing failures; "
+          f"{len(result['review_reasons'])} unresolved checks")
+    return {"pass": 0, "review": 1, "fail": 2}[result["status"]]
 
-print()
-print(f"spans: {len(fp.spans)}   matches: {fp.n_matches}")
-worst = 0.0
-for s in fp.spans:
-    worst = max(worst, abs(s.offset))
-    flag = "  <-- OFF" if abs(s.offset) > 0.15 else ""
-    print(f"  ad {s.ad_start:7.0f}-{s.ad_end:7.0f}  offset {s.offset:+8.3f} s  ({s.matches} m){flag}")
-print(f"worst span offset: {worst * 1000:.0f} ms")
-for lo, hi in fp.unmatched:
-    print(f"  unmatched {lo:7.0f}-{hi:7.0f}  ({(hi - lo):.0f} s)")
+
+if __name__ == "__main__":
+    raise SystemExit(main())

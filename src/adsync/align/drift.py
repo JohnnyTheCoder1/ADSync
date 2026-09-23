@@ -7,8 +7,8 @@ from typing import Callable
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.signal import fftconvolve
 
+from adsync.compute import CorrelationBackend
 from adsync.models import Anchor, FeatureBundle
 
 log = logging.getLogger("adsync")
@@ -26,6 +26,7 @@ def estimate_drift(
     y_ad: NDArray | None = None,
     audio_sr: int = 16000,
     on_progress: Callable[[int, int], None] | None = None,
+    compute: CorrelationBackend | None = None,
 ) -> tuple[float, float, list[Anchor], float]:
     """Measure offset at several points and fit a linear drift model.
 
@@ -37,6 +38,7 @@ def estimate_drift(
     When *y_vid* and *y_ad* are provided, uses raw audio waveforms instead of
     onset features for more reliable local cross-correlation.
     """
+    compute = compute if compute is not None else CorrelationBackend("cpu")
     # Use raw audio if available, else fall back to onset features
     if y_vid is not None and y_ad is not None:
         # Downsample to ~4 kHz for fast local cross-correlation
@@ -82,7 +84,7 @@ def estimate_drift(
             on_progress(i, n_test_points)
         anchor = _local_offset(
             vid, ad, float(t), sec_per_sample, window_sec, search_sec,
-            hint_frames=hint_samples,
+            hint_frames=hint_samples, compute=compute,
         )
         if anchor is not None:
             anchors.append(anchor)
@@ -91,16 +93,18 @@ def estimate_drift(
         log.warning("Too few anchors (%d) for drift estimation", len(anchors))
         return 0.0, 0.0, anchors, 0.0
 
-    # Fit offset(t) = intercept + slope * t on source - target (positive = AD
-    # shifts later, matches global_offset), weighted by anchor score so
-    # high-quality matches dominate the fit.
-    times = np.array([a.source_time for a in anchors])
+    # _local_offset locates a video window (source_time) in the AD
+    # (target_time). Fit V-A against AD time A so the returned coefficients
+    # describe V = intercept + (1 + slope) * A, as used by the renderer.
+    # Fitting against V instead would return the inverse time scale and
+    # introduce a systematic timing error when applied to the AD.
+    times = np.array([a.target_time for a in anchors])
     offsets = np.array([a.source_time - a.target_time for a in anchors])
 
     for i, a in enumerate(anchors):
         log.info(
-            "  Anchor %2d: t=%7.1fs  offset=%+.4fs  score=%.3f",
-            i + 1, a.source_time, a.source_time - a.target_time, a.score,
+            "  Anchor %2d: AD t=%7.1fs  offset=%+.4fs  score=%.3f",
+            i + 1, a.target_time, a.source_time - a.target_time, a.score,
         )
     weights = np.array([a.score for a in anchors])
 
@@ -158,6 +162,8 @@ def _local_offset(
     window_sec: float,
     search_sec: float,
     hint_frames: int = 0,
+    *,
+    compute: CorrelationBackend | None = None,
 ) -> Anchor | None:
     """Find best local offset near *center_sec* with sub-frame precision.
 
@@ -191,22 +197,10 @@ def _local_offset(
     a_region = ad[a_region_start:a_region_end].copy()
     a_region -= np.mean(a_region)
 
-    # FFT-based sliding cross-correlation (identical to np.correlate "valid",
-    # but O(n log n) — direct correlation at these sizes costs seconds per anchor)
-    full_corr = fftconvolve(a_region, v_seg[::-1], mode="valid")
-    if len(full_corr) == 0:
+    compute = compute if compute is not None else CorrelationBackend("cpu")
+    norm_corr = compute.normalized_correlation(a_region, v_seg, template_energy=v_norm)
+    if len(norm_corr) == 0:
         return None
-
-    # Per-position normalization via running sum-of-squares
-    a_sq = a_region ** 2
-    cumsum = np.empty(len(a_sq) + 1, dtype=np.float64)
-    cumsum[0] = 0.0
-    np.cumsum(a_sq, out=cumsum[1:])
-    n_pos = len(full_corr)
-    a_norms_sq = cumsum[win_frames:win_frames + n_pos] - cumsum[:n_pos]
-    a_norms = np.sqrt(np.maximum(a_norms_sq, 1e-20))
-
-    norm_corr = full_corr / (v_norm * a_norms)
 
     # Find integer peak
     best_idx = int(np.argmax(norm_corr))

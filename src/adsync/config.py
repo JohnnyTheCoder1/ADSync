@@ -10,6 +10,13 @@ from pydantic import BaseModel, Field
 class SyncConfig(BaseModel):
     """All tuneable parameters for a sync run."""
 
+    device: Literal["auto", "cpu", "cuda"] = Field(
+        "auto", description="Correlation backend: auto uses CUDA when available, cpu disables it, cuda requires it",
+    )
+    threads: int | None = Field(
+        None, ge=1, description="Per-process CPU thread budget; defaults to ADSYNC_THREADS or usable CPUs",
+    )
+
     # analysis
     analysis_sr: int = Field(16000, description="Sample rate for analysis WAVs")
     mono: bool = Field(True, description="Convert to mono for analysis")
@@ -29,6 +36,7 @@ class SyncConfig(BaseModel):
     anchor_step_sec: float = Field(2.0, description="Step size for anchor search")
 
     # output
+    prepare_audio: bool = Field(False, description="Keep requested original language and prepare stereo during final mux")
     ad_language: str = Field("eng", description="Language tag for AD track")
     ad_title: str = Field("Audio Description", description="Title for AD track")
     output_sr: int = Field(48000, description="Sample rate for final output audio")

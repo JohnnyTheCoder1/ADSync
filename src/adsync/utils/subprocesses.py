@@ -7,6 +7,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from adsync.hardware import effective_thread_count
+
 log = logging.getLogger("adsync")
 
 
@@ -59,13 +61,30 @@ def _parse_ffmpeg_error(stderr: str) -> str:
     return lines[-1] if lines else "(no output)"
 
 
-def run_ffmpeg(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+def _threaded_args(args: list[str], threads: int | None = None) -> list[str]:
+    """Cap each input decoder, the output encoder, and filter thread pools.
+
+    These helpers accept one output, at the final argument. FFmpeg's codec
+    options are positional, so an output-only -threads flag cannot cap inputs.
+    """
+    count = str(effective_thread_count(threads))
+    result = ["-filter_threads", count, "-filter_complex_threads", count]
+    for arg in args[:-1]:
+        if arg == "-i":
+            result.extend(["-threads", count])
+        result.append(arg)
+    if args:
+        result.extend(["-threads", count, args[-1]])
+    return result
+
+
+def run_ffmpeg(args: list[str], *, check: bool = True, threads: int | None = None) -> subprocess.CompletedProcess[str]:
     """Run an ffmpeg command and return the result.
 
     Raises :class:`FFmpegError` with a parsed message on failure.
     """
     binary = _find_binary("ffmpeg")
-    cmd = [binary, "-hide_banner", "-y", *args]
+    cmd = [binary, "-hide_banner", "-y", *_threaded_args(args, threads)]
     log.debug("ffmpeg %s", " ".join(args))
     result = subprocess.run(
         cmd,
@@ -83,13 +102,14 @@ def run_ffmpeg_piped(
     stdin_data: bytes,
     *,
     check: bool = True,
+    threads: int | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run an ffmpeg command with raw bytes piped to stdin.
 
     Raises :class:`FFmpegError` on failure.
     """
     binary = _find_binary("ffmpeg")
-    cmd = [binary, "-hide_banner", "-y", *args]
+    cmd = [binary, "-hide_banner", "-y", *_threaded_args(args, threads)]
     log.debug("ffmpeg %s", " ".join(args))
     result = subprocess.run(
         cmd,
@@ -107,6 +127,7 @@ def run_ffmpeg_streamed(
     args: list[str],
     *,
     check: bool = True,
+    threads: int | None = None,
 ) -> subprocess.Popen[bytes]:
     """Start an ffmpeg process with stdin open for streaming writes.
 
@@ -114,7 +135,7 @@ def run_ffmpeg_streamed(
     and call ``proc.stdin.close()`` + ``proc.wait()`` when done.
     """
     binary = _find_binary("ffmpeg")
-    cmd = [binary, "-hide_banner", "-y", *args]
+    cmd = [binary, "-hide_banner", "-y", *_threaded_args(args, threads)]
     log.debug("ffmpeg %s", " ".join(args))
     return subprocess.Popen(
         cmd,

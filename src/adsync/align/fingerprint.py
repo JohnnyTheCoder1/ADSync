@@ -27,6 +27,9 @@ import librosa
 import numpy as np
 from numpy.typing import NDArray
 from scipy.ndimage import maximum_filter
+from scipy.signal import butter, correlate, sosfiltfilt
+
+from adsync.hardware import effective_thread_count, worker_initializer
 
 log = logging.getLogger("adsync")
 
@@ -72,6 +75,19 @@ class FingerprintSpan:
 
 
 @dataclass
+class TerminalSupport:
+    """Measured body/tail bracket, accepted by landmarks and waveform audio."""
+    boundary: float
+    body_time: float
+    body_offset: float
+    first_time: float
+    last_time: float
+    offset: float
+    matches: int
+    waveform_score: float
+
+
+@dataclass
 class FingerprintResult:
     spans: list[FingerprintSpan] = field(default_factory=list)
     unmatched: list[tuple[float, float]] = field(default_factory=list)
@@ -84,6 +100,16 @@ class FingerprintResult:
     # soundtracks).  None when matching produced no supported spans.
     match_t_ad: NDArray[np.float32] | None = None
     match_t_vid: NDArray[np.float32] | None = None
+    # Independent QC must see short minority offsets that are unsuitable for
+    # steering but may identify a local error inside a dominant bucket.
+    raw_match_t_ad: NDArray[np.float32] | None = None
+    raw_match_t_vid: NDArray[np.float32] | None = None
+    # Preserve short hypotheses, but never let an unconfirmed tail become a
+    # span hint. Full-rate waveform checks promote only independently backed
+    # tails. Bucket summaries retain the raw vote before chain/span filters.
+    short_terminal_spans: list[FingerprintSpan] = field(default_factory=list)
+    terminal_support: list[TerminalSupport] = field(default_factory=list)
+    raw_bucket_support: list[dict] = field(default_factory=list)
 
     @property
     def strong(self) -> bool:
@@ -120,15 +146,18 @@ def fingerprint_align(
     sr: int,
 ) -> FingerprintResult:
     """Fingerprint both tracks, match hashes, and localize offset spans."""
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        f_vid = pool.submit(_landmarks, y_vid, sr)
-        f_ad = pool.submit(_landmarks, y_ad, sr)
+    from adsync.quality import cached_landmarks
+
+    with ThreadPoolExecutor(max_workers=min(2, effective_thread_count()), initializer=worker_initializer()) as pool:
+        f_vid = pool.submit(cached_landmarks, y_vid, sr)
+        f_ad = pool.submit(cached_landmarks, y_ad, sr)
         vid_hashes, vid_times = f_vid.result()
         ad_hashes, ad_times = f_ad.result()
 
     t_ad, t_vid = _match(vid_hashes, vid_times, ad_hashes, ad_times)
     ad_duration = len(y_ad) / sr
     result = _offset_spans(t_ad, t_vid, ad_duration)
+    _recover_terminal_support(result, t_ad, t_vid, y_vid, y_ad, sr)
 
     if result.spans:
         summary = "; ".join(
@@ -145,6 +174,119 @@ def fingerprint_align(
     for lo, hi in result.unmatched:
         log.warning("Fingerprint: no matches for AD %.0f–%.0f s", lo, hi)
     return result
+
+
+def _terminal_waveform_support(y_vid, y_ad, sr, first, last, offset) -> float | None:
+    """Confirm an offset in two disjoint full-rate waveform windows.
+
+    Normalization uses local float64 energies and an absolute/relative floor;
+    very quiet samples cannot create enormous scores through cancellation.
+    The narrow search accounts for fingerprint quantization, not new offsets.
+    """
+    duration = last - first
+    if duration < 0.5:
+        return None
+    width = min(2.0, duration / 2)
+    scores, measured = [], []
+    relative_rms = max(float(np.sqrt(np.mean(np.square(y_ad[::max(1, sr // 20)], dtype=np.float64)))),
+                       float(np.sqrt(np.mean(np.square(y_vid[::max(1, sr // 20)], dtype=np.float64)))))
+    floor = max(1e-6, relative_rms * 1e-3)
+    radius = round(0.10 * sr)
+    for start in (first, last - width):
+        a0, length = round(start * sr), round(width * sr)
+        v0 = round((start + offset) * sr) - radius
+        if a0 < 0 or a0 + length > len(y_ad) or v0 < 0 or v0 + length + 2 * radius > len(y_vid):
+            return None
+        template = np.asarray(y_ad[a0:a0 + length], dtype=np.float64)
+        region = np.asarray(y_vid[v0:v0 + length + 2 * radius], dtype=np.float64)
+        if np.sqrt(np.mean(template ** 2)) < floor or np.sqrt(np.mean(region ** 2)) < floor:
+            return None
+        best_score, best_shift = 0.0, None
+        for low, high in ((100, 400), (1200, min(5000, sr * .45))):
+            if high <= low:
+                continue
+            sos = butter(3, [low, high], btype="bandpass", fs=sr, output="sos")
+            a = sosfiltfilt(sos, template)
+            v = sosfiltfilt(sos, region)
+            a -= a.mean()
+            v -= v.mean()
+            ea = float(np.dot(a, a))
+            if ea < length * floor * floor:
+                continue
+            numerator = correlate(v, a, mode="valid", method="fft")
+            cumulative = np.r_[0., np.cumsum(v * v, dtype=np.float64)]
+            energy = cumulative[length:] - cumulative[:-length]
+            valid = energy >= max(length * floor * floor, float(np.max(energy)) * 1e-6)
+            normalized = np.full(len(numerator), -1.)
+            normalized[valid] = numerator[valid] / np.sqrt(ea * energy[valid])
+            k = int(np.argmax(normalized))
+            # Recompute the winning dot products directly. A cumsum rounding
+            # artifact cannot pass this independent local normalization.
+            candidate = v[k:k + length]
+            denom = np.sqrt(ea * float(np.dot(candidate, candidate)))
+            score = float(np.dot(candidate, a)) / denom if denom > 0 else 0.0
+            if score > best_score:
+                best_score, best_shift = score, (k - radius) / sr
+        if best_score < .45 or best_shift is None or abs(best_shift) > .08:
+            return None
+        scores.append(best_score)
+        measured.append(best_shift)
+    if abs(measured[0] - measured[1]) > .04:
+        return None
+    return min(scores)
+
+
+def _recover_terminal_support(result, t_ad, t_vid, y_vid, y_ad, sr) -> None:
+    """Promote a short closing span only with contiguous independent support."""
+    if not result.spans or result.match_t_ad is None:
+        return
+    offsets = t_vid.astype(np.float64) - t_ad
+    for span in result.short_terminal_spans:
+        mask = ((t_ad >= span.ad_start) & (t_ad < span.ad_end)
+                & (np.abs(offsets - span.offset) <= .10))
+        times = t_ad[mask]
+        if len(times) < 30:
+            continue
+        first, last = float(np.min(times)), float(np.max(times))
+        preceding = [s for s in result.spans if s.ad_end <= span.ad_start]
+        if not preceding:
+            continue
+        body = preceding[-1]
+        old_offsets = result.match_t_vid - result.match_t_ad
+        body_mask = ((result.match_t_ad < first) & (result.match_t_ad >= first - 30)
+                     & (np.abs(old_offsets - body.offset) <= .10))
+        if np.count_nonzero(body_mask) < 12:
+            continue
+        body_time = float(np.max(result.match_t_ad[body_mask]))
+        # Evidence must advance in video within the two measured pieces;
+        # a real negative edit may still overlap their extrapolated ranges.
+        if first + span.offset < body_time + body.offset - .5:
+            continue
+        score = _terminal_waveform_support(y_vid, y_ad, sr, first, last, span.offset)
+        if score is None:
+            continue
+        result.terminal_support.append(TerminalSupport(
+            boundary=(body_time + first) / 2, body_time=body_time,
+            body_offset=body.offset, first_time=first, last_time=last,
+            offset=float(np.median(offsets[mask])), matches=int(mask.sum()), waveform_score=score,
+        ))
+        result.spans.append(span)
+        a = np.r_[result.match_t_ad, t_ad[mask]].astype(np.float32)
+        v = np.r_[result.match_t_vid, t_vid[mask]].astype(np.float32)
+        order = np.argsort(a, kind="stable")
+        result.match_t_ad, result.match_t_vid = a[order], v[order]
+        unmatched = []
+        for lo, hi in result.unmatched:
+            if hi <= span.ad_start or lo >= span.ad_end:
+                unmatched.append((lo, hi))
+            else:
+                if lo < span.ad_start:
+                    unmatched.append((lo, span.ad_start))
+                if hi > span.ad_end:
+                    unmatched.append((span.ad_end, hi))
+        result.unmatched = unmatched
+        log.info("Independent terminal support: %.2f–%.2f s at %+.3f s (waveform %.3f)",
+                 first, last, span.offset, score)
 
 
 # ── Internals ────────────────────────────────────────────────────────────────
@@ -315,7 +457,9 @@ def _offset_spans(
     ad_duration: float,
 ) -> FingerprintResult:
     """Histogram matches into per-bucket dominant offsets, merge into spans."""
-    result = FingerprintResult(n_matches=len(t_ad))
+    result = FingerprintResult(n_matches=len(t_ad),
+                               raw_match_t_ad=t_ad.astype(np.float32, copy=True),
+                               raw_match_t_vid=t_vid.astype(np.float32, copy=True))
     n_buckets = max(1, int(np.ceil(ad_duration / _BUCKET_SEC)))
     if len(t_ad) == 0:
         result.unmatched = [(0.0, ad_duration)]
@@ -359,6 +503,12 @@ def _offset_spans(
         if np.any(sel):
             bucket_offset[b] = float(np.median(offsets[sel]))
 
+    result.raw_bucket_support = [
+        {"ad_start": float(b * _BUCKET_SEC), "offset": float(bucket_offset[b]),
+         "matches": int(bucket_matches[b])}
+        for b in np.nonzero(~np.isnan(bucket_offset))[0]
+    ]
+
     # A playback map must be (near-)monotone in video time: repeated
     # soundtrack content can win a bucket's majority vote with a physically
     # impossible offset (the credits song also plays 15 minutes earlier).
@@ -384,6 +534,11 @@ def _offset_spans(
                                   matches=int(bucket_matches[b]))
             spans.append(cur)
 
+    result.short_terminal_spans = [
+        s for s in spans if 5 <= s.ad_end - s.ad_start < _MIN_SPAN_SEC
+        and s.ad_start >= ad_duration - 30 and ad_duration - s.ad_end <= 15
+        and s.matches >= 30 and s.density >= _MIN_SPAN_DENSITY
+    ]
     spans = [s for s in spans if s.ad_end - s.ad_start >= _MIN_SPAN_SEC]
     result.spans = spans
 
