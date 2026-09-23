@@ -76,7 +76,7 @@ def sync(
     max_stretch: float = typer.Option(0.01, "--max-stretch"),
     crossfade_ms: int = typer.Option(80, "--crossfade-ms"),
     analysis_sr: int = typer.Option(16000, "--analysis-sr"),
-    mode: str = typer.Option("auto", "--mode", help="auto|offset|drift|piecewise|warp"),
+    mode: str = typer.Option("auto", "--mode", help="auto, offset, drift, piecewise, warp, or partial (experimental gap-aware alignment)"),
     device: Device = typer.Option(Device.auto, "--device", envvar="ADSYNC_DEVICE", help="Correlation device: auto, cpu, cuda"),
     threads: Optional[int] = typer.Option(None, "--threads", min=1, envvar="ADSYNC_THREADS", help="CPU thread budget for this run"),
     offset_adjust: float = typer.Option(0.0, "--offset-adjust", help="Manual offset tweak in seconds (positive = push AD later)"),
@@ -139,7 +139,7 @@ def sync(
         console.print(f"Error: {exc}", markup=False)
         raise typer.Exit(2)
 
-    raise typer.Exit(0 if result.confidence >= config.confidence_threshold else 1)
+    raise typer.Exit(0 if result.confidence >= config.confidence_threshold and not result.alignment_review_required else 1)
 
 
 # ── prep ─────────────────────────────────────────────────────────────────────
@@ -220,7 +220,7 @@ def analyze(
     video: Path = typer.Argument(..., help="Video file"),
     ad_audio: Path = typer.Argument(..., help="Audio description file"),
     report: Path = typer.Option("report.json", "--report"),
-    mode: str = typer.Option("auto", "--mode"),
+    mode: str = typer.Option("auto", "--mode", help="auto, offset, drift, piecewise, warp, or partial"),
     device: Device = typer.Option(Device.auto, "--device", envvar="ADSYNC_DEVICE", help="Correlation device: auto, cpu, cuda"),
     threads: Optional[int] = typer.Option(None, "--threads", min=1, envvar="ADSYNC_THREADS", help="CPU thread budget for this run"),
     analysis_sr: int = typer.Option(16000, "--analysis-sr"),
@@ -252,7 +252,7 @@ def debug(
     video: Path = typer.Argument(..., help="Video file"),
     ad_audio: Path = typer.Argument(..., help="Audio description file"),
     workdir: Path = typer.Option("debug_out", "--workdir"),
-    mode: str = typer.Option("auto", "--mode"),
+    mode: str = typer.Option("auto", "--mode", help="auto, offset, drift, piecewise, warp, or partial"),
     device: Device = typer.Option(Device.auto, "--device", envvar="ADSYNC_DEVICE", help="Correlation device: auto, cpu, cuda"),
     threads: Optional[int] = typer.Option(None, "--threads", min=1, envvar="ADSYNC_THREADS", help="CPU thread budget for this run"),
     analysis_sr: int = typer.Option(16000, "--analysis-sr"),
@@ -332,7 +332,7 @@ def _run_analysis(**kwargs):
     except (CudaBackendError, ValueError) as exc:
         console.print(f"Error: {exc}", markup=False)
         raise typer.Exit(2)
-    raise typer.Exit(0 if result.confidence >= kwargs["config"].confidence_threshold else 1)
+    raise typer.Exit(0 if result.confidence >= kwargs["config"].confidence_threshold and not result.alignment_review_required else 1)
 
 
 def _validate_output(output: Path, *inputs: Path) -> None:

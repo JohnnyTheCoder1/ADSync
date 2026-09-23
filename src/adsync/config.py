@@ -92,4 +92,4 @@ class SyncConfig(BaseModel):
     )
 
     # mode
-    mode: Literal["auto", "offset", "drift", "piecewise", "warp"] = Field("auto", description="auto|offset|drift|piecewise|warp")
+    mode: Literal["auto", "offset", "drift", "piecewise", "warp", "partial"] = Field("auto", description="auto|offset|drift|piecewise|warp|partial")

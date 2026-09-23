@@ -82,7 +82,10 @@ def print_summary(report: SyncReport) -> None:
 
     console.print(table)
 
-    _print_timing_map(report)
+    if report.mode == "partial":
+        _print_partial_map(report)
+    else:
+        _print_timing_map(report)
 
     # Warnings
     if report.warnings:
@@ -93,7 +96,9 @@ def print_summary(report: SyncReport) -> None:
 
     # Confidence interpretation
     console.print()
-    if report.confidence >= 0.90:
+    if report.alignment_review_required:
+        console.print("[bold yellow]Review required: the alignment has unresolved evidence.[/bold yellow]")
+    elif report.confidence >= 0.90:
         console.print("[bold green]High alignment confidence[/bold green]")
     elif report.confidence >= 0.75:
         console.print("[bold yellow]Medium confidence — review recommended[/bold yellow]")
@@ -101,6 +106,28 @@ def print_summary(report: SyncReport) -> None:
         console.print("[bold red]Low confidence — debug review strongly recommended[/bold red]")
 
     console.print()
+
+
+def _print_partial_map(report: SyncReport, max_rows: int = 12) -> None:
+    detail = report.timing_debug.get("partial_alignment", {})
+    adjustment = detail.get("playback_offset_adjust_sec", 0.0)
+    rows = []
+    for span in detail.get("matched_intervals", []):
+        rows.append(f"AD {_mmss(span['source_start'])}-{_mmss(span['source_end'])} -> "
+                    f"video {_mmss(span['target_start'])}-{_mmss(span['target_end'])}")
+    for key, title in (("source_gaps", "Unmeasured AD"), ("target_gaps", "Unmeasured video"),
+                       ("ambiguous_ranges", "Competing matches at AD")):
+        for span in detail.get(key, []):
+            rows.append(f"{title} {_mmss(span['start_sec'])}-{_mmss(span['end_sec'])}")
+    if rows:
+        console.print()
+        console.print("[bold]Partial alignment:[/bold]")
+        if adjustment:
+            console.print(f"  Measured coordinates before playback adjustment {adjustment:+.2f} s")
+        for row in rows[:max_rows]:
+            console.print(f"  {row}")
+        if len(rows) > max_rows:
+            console.print(f"  {len(rows) - max_rows} more regions in the JSON report")
 
 
 def _print_timing_map(report: SyncReport, jump_threshold: float = 2.0, max_rows: int = 12) -> None:

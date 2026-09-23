@@ -55,8 +55,11 @@ ADSync tries four alignment strategies in order of complexity, and uses whicheve
 | `drift` | Both tracks match but sample rates or clocks differ slightly | Measures offset at several points, fits a weighted linear drift model |
 | `warp` *(default fallback)* | Cuts differ, inserted scenes, missing recaps, shifted ad breaks | Builds a top-K candidate lattice per window, runs a DP decoder with jump/curvature penalties + speech-rich bonuses, then fits a shape-preserving PCHIP warp and renders the output from a continuous time-map |
 | `piecewise` | The classic stitch-and-crossfade approach | Anchor search + piecewise map with crossfades. Kept around for the easy cases and for comparison |
+| `partial` *(opt-in, experimental)* | Short matching fragments and uncertain edits | Fits measured fragments separately, records unmeasured intervals, and reports competing alignment paths |
 
 Warp mode is the default when offset/drift aren't enough, since solving the time-map globally tends to hold together better than reconciling independent per-chunk decisions after the fact.
+
+For difficult edited material, try `adsync analyze video.mkv ad.m4a --mode partial --report alignment.json`. This experimental mode exposes gaps and ambiguous matches instead of forcing a full-track map. Read [partial alignment](docs/partial-alignment.md) before rendering: provisional output omits unplaced AD and leaves silence in unmeasured target regions, and season publication requires review when the alignment remains unresolved.
 
 ## Installation
 

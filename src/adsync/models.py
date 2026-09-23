@@ -122,6 +122,7 @@ class SegmentMap(BaseModel):
 class SyncReport(BaseModel):
     mode: str
     confidence: float
+    alignment_review_required: bool = False
     timing_debug: dict[str, Any] = Field(default_factory=dict)
     identity_check: dict[str, Any] = Field(default_factory=dict)
     quality_check: dict[str, Any] = Field(default_factory=dict)

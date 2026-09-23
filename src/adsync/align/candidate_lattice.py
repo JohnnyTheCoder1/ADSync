@@ -45,6 +45,7 @@ def build_candidate_lattice(
     min_score: float = 0.3,
     max_candidates: int = 5,
     multiband: bool = True,
+    include_boundary_matches: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
     compute: CorrelationBackend | None = None,
     threads: int | None = None,
@@ -62,6 +63,10 @@ def build_candidate_lattice(
     called with the window's AD-time centre, it returns that window's expected
     offset (e.g. from fingerprint spans), so even huge edits need only a small
     radius.
+
+    *include_boundary_matches* also measures the last complete source window
+    and admits correlation peaks at either search endpoint. This prevents a
+    repeated passage touching a recording boundary from losing evidence.
 
     Returns a list of :class:`CandidateWindow`, one per analysis position.
     """
@@ -114,6 +119,10 @@ def build_candidate_lattice(
     narration_hi = max(narration_lo + 1, int(np.searchsorted(mel_freqs, 4000.0)))
 
     ad_positions = list(range(0, len(ad) - win_samples, step_samples))
+    if include_boundary_matches and len(ad) >= win_samples:
+        last_start = len(ad) - win_samples
+        if not ad_positions or ad_positions[-1] != last_start:
+            ad_positions.append(last_start)
     total_windows = len(ad_positions)
 
     def _one_window(ad_start: int) -> CandidateWindow:
@@ -203,7 +212,12 @@ def build_candidate_lattice(
         n_pos = len(norm_corr)
 
         mean_corr = float(np.mean(np.abs(norm_corr)))
-        peak_indices, _ = find_peaks(norm_corr, distance=min_peak_dist)
+        if include_boundary_matches:
+            padded = np.concatenate(([-np.inf], norm_corr, [-np.inf]))
+            peak_indices, _ = find_peaks(padded, distance=min_peak_dist)
+            peak_indices -= 1
+        else:
+            peak_indices, _ = find_peaks(norm_corr, distance=min_peak_dist)
 
         if len(peak_indices) == 0:
             best_idx = int(np.argmax(norm_corr))

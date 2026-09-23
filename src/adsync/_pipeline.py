@@ -282,7 +282,7 @@ def run_pipeline(
 
         # Warp mode also needs offset/drift hints for the decoder.
         offset_windows: list[float] = []
-        if mode in ("auto", "offset", "drift", "warp"):
+        if mode in ("auto", "offset", "drift", "warp", "partial"):
             log.info("Step 5/12: Estimating global offset")
             offset, offset_conf, offset_windows = estimate_global_offset(
                 vid_feat, ad_feat,
@@ -363,7 +363,7 @@ def run_pipeline(
                 else:
                     mode = "offset"
                     log.info("Mode: offset (conf=%.3f)", best_conf)
-            elif mode == "warp":
+            elif mode in ("warp", "partial"):
                 log.info(
                     "Offset/drift collected as hints for warp (offset=%.3f s, drift=%.1f ppm)",
                     global_offset, drift_ppm,
@@ -375,6 +375,8 @@ def run_pipeline(
         warp_segment_ranges = None
         warp_path_result = None
         fp_anchor_windows = 0
+        alignment_review_required = False
+        partial_diagnostics = None
         timing_debug: dict = {"policy_revision": "measured-cuts-terminal-v1"}
         if fp is not None:
             from dataclasses import asdict
@@ -389,7 +391,7 @@ def run_pipeline(
                 "match_t_vid": fp.match_t_vid.tolist() if fp.match_t_vid is not None else [],
             }
 
-        if mode in ("auto", "warp") and not segments:
+        if mode in ("auto", "warp", "partial") and not segments:
             from adsync.align.candidate_lattice import build_candidate_lattice
             from adsync.align.warp_decode import decode_warp_path
             from adsync.align.warp_fit import fit_warp_function
@@ -411,7 +413,7 @@ def run_pipeline(
             # video/AD duration gap and the measured offset scatter.
             if config.warp_search_radius is not None:
                 search_radius = config.warp_search_radius
-            elif fp_hint_fn is not None:
+            elif fp_hint_fn is not None and mode != "partial":
                 max_jump = max(
                     (abs(b.offset - a.offset) for a, b in zip(fp.spans, fp.spans[1:])),
                     default=0.0,
@@ -434,13 +436,14 @@ def run_pipeline(
                 lattice = build_candidate_lattice(
                     vid_feat, ad_feat,
                     y_vid=y_vid, y_ad=y_ad, audio_sr=sr,
-                    window_sec=config.anchor_window_sec,
-                    step_sec=config.anchor_step_sec,
+                    window_sec=2.0 if mode == "partial" else config.anchor_window_sec,
+                    step_sec=1.0 if mode == "partial" else config.anchor_step_sec,
                     search_radius_sec=search_radius,
                     offset_hint=global_offset or 0.0,
                     offset_hint_fn=fp_hint_fn,
                     max_candidates=config.warp_max_candidates,
                     multiband=config.multiband,
+                    include_boundary_matches=mode == "partial",
                     on_progress=_lattice_progress,
                     compute=compute,
                     threads=threads,
@@ -452,7 +455,7 @@ def run_pipeline(
             # the matches themselves become window anchors.
             windows_with_candidates = sum(1 for w in lattice if w.candidates)
             coverage = windows_with_candidates / max(1, len(lattice))
-            if config.fp_anchor and fp is not None and fp.strong:
+            if mode != "partial" and config.fp_anchor and fp is not None and fp.strong:
                 from adsync.align.candidate_lattice import augment_lattice_with_fingerprint
 
                 log.info(
@@ -470,7 +473,25 @@ def run_pipeline(
                         "soundtrack mixes)"
                     )
 
-            if windows_with_candidates < 3:
+            if mode == "partial":
+                if config.fp_anchor and fp is not None:
+                    from adsync.align.partial_evidence import augment_partial_evidence
+                    fp_anchor_windows = augment_partial_evidence(
+                        lattice, fp, max_candidates=config.warp_max_candidates,
+                    )
+                from adsync.align.partial_fit import fit_partial_alignment
+
+                log.info("Step 8/12: Decoding partial alignment and competing paths")
+                warp_fns, warp_segment_ranges, warp_path_result, partial_diagnostics = fit_partial_alignment(
+                    lattice, ad_duration, video_duration,
+                    window_sec=2.0, step_sec=1.0, max_stretch=config.max_stretch,
+                )
+                timing_debug["partial_alignment"] = partial_diagnostics
+                timing_debug["pre_vetting_path"] = [p.model_dump() for p in warp_path_result.points]
+                anchors = [Anchor(source_time=p.source_time, target_time=p.target_time,
+                                  score=p.confidence, window=2.0)
+                           for p in warp_path_result.anchor_points]
+            elif windows_with_candidates < 3:
                 log.warning(
                     "Only %d windows with candidates — falling back to piecewise",
                     windows_with_candidates,
@@ -534,10 +555,8 @@ def run_pipeline(
             segments = build_piecewise_map(anchors, ad_duration, video_duration, config)
             mode = "piecewise"
 
-        # ── Verification: fitted warp vs fingerprint matches ────────────
-        # Independent cross-check — landmarks located content globally, the
-        # warp came from windowed correlation; agreement is what "verified"
-        # means, and it feeds the confidence score.
+        # Fingerprint residuals measure fit consistency. Landmark-derived
+        # anchors reuse this evidence; rendered-output QC is a separate check.
         fp_res_p50: float | None = None
         fp_res_p95: float | None = None
         if (warp_fns is not None and fp is not None
@@ -563,11 +582,35 @@ def run_pipeline(
 
         # ── Confidence ───────────────────────────────────────────────────
         confidence, warnings = compute_confidence(
-            anchors, segments, ad_duration, video_duration, mode=mode,
+            anchors, segments, ad_duration, video_duration, mode="warp" if mode == "partial" else mode,
             warp_path=warp_path_result,
             fp_residual_p95_ms=fp_res_p95,
         )
         warnings = extra_warnings + warnings
+        if partial_diagnostics is not None:
+            if not warp_fns:
+                confidence = 0.0
+                alignment_review_required = True
+                warnings.append("Partial alignment found no supported matched segments; output withheld.")
+            else:
+                source_coverage = sum(hi - lo for lo, hi in warp_segment_ranges) / max(ad_duration, 1e-9)
+                confidence = min(confidence, warp_path_result.mean_confidence, source_coverage)
+            if partial_diagnostics.get("ambiguous_ranges"):
+                alignment_review_required = True
+                warnings.append("Competing alignment paths remain plausible; review the partial alignment report.")
+            for axis in ("source", "target"):
+                gaps = partial_diagnostics.get(f"{axis}_gaps", [])
+                if gaps:
+                    seconds = sum(gap["end_sec"] - gap["start_sec"] for gap in gaps)
+                    warnings.append(f"Partial alignment leaves {seconds:.2f} s of the {axis} timeline unmeasured.")
+                    if any(gap["end_sec"] - gap["start_sec"] > 1 / sr for gap in gaps):
+                        alignment_review_required = True
+            if partial_diagnostics.get("status") != "matched":
+                alignment_review_required = True
+            if alignment_review_required:
+                confidence = min(confidence, max(0.0, config.confidence_threshold - .01))
+            partial_diagnostics["review_required"] = alignment_review_required
+            partial_diagnostics["playback_offset_adjust_sec"] = config.offset_adjust
 
         # Keep confidence/landmark verification about the measured alignment.
         # Apply the user's final playback nudge consistently in every mode.
@@ -580,7 +623,7 @@ def run_pipeline(
                 if id(point) not in seen:
                     point.target_time += adjust
                     seen.add(id(point))
-        if adjust and mode in ("warp", "piecewise"):
+        if adjust and mode in ("warp", "piecewise", "partial"):
             for anchor in anchors:
                 anchor.target_time += adjust
 
@@ -630,7 +673,7 @@ def run_pipeline(
         synced_y = None
         hq_sr = None
 
-        if (mux or debug_dir) and not identity_failed:
+        if (mux or debug_dir) and not identity_failed and (mode != "partial" or warp_fns):
             log.info("Step 9/12: Rebuilding synced AD track (HQ)")
             extract_audio(
                 ad_info, ad_hq_wav, sr=ad_hq_sr, mono=False,
@@ -640,7 +683,7 @@ def run_pipeline(
             y_ad_hq, hq_sr = load_wav(ad_hq_wav, sr=ad_hq_sr, mono=False)
             hq_video_duration = video_duration
 
-            if mode == "warp" and warp_fns is not None:
+            if mode in ("warp", "partial") and warp_fns is not None:
                 from adsync.rebuild.warp_render import render_from_warp
                 synced_y = render_from_warp(
                     y_ad_hq, hq_sr, warp_fns, warp_segment_ranges,
@@ -686,6 +729,7 @@ def run_pipeline(
         report = SyncReport(
             mode=mode,
             confidence=confidence,
+            alignment_review_required=alignment_review_required,
             compute_requested=compute.requested_backend,
             compute_backend=compute.active_backend,
             compute_device=compute.device_name,

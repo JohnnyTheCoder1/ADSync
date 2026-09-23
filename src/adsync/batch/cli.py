@@ -71,7 +71,7 @@ def season(
     jobs: Optional[int] = typer.Option(None, "--jobs", min=1, help="Concurrent episodes; default: detected CPU/RAM/GPU capacity"),
     threads: Optional[int] = typer.Option(None, "--threads", min=1, help="CPU threads per episode; default: split between jobs"),
     device: str = typer.Option("auto", "--device", envvar="ADSYNC_DEVICE", help="auto, cpu, or cuda"),
-    mode: str = typer.Option("auto", "--mode", help="auto, offset, drift, piecewise, or warp"),
+    mode: str = typer.Option("auto", "--mode", help="auto, offset, drift, piecewise, warp, or partial (experimental)"),
     language: str = typer.Option("eng", "--language", help="Original audio language to keep and AD language tag"),
     no_prep: bool = typer.Option(False, "--no-prep", help="Keep all original audio streams without stereo preparation"),
     codec: str = typer.Option("libopus", "--codec", help="Output AD audio codec"),

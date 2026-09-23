@@ -145,6 +145,26 @@ def execute_transaction(spec: dict, config, *, run_pipeline: Callable, verify_me
                                        "work_path": str(work), "report_signature": content_signature(report_path),
                                        "qc_signature": content_signature(qc_path)})
             raise ValueError("Content identity failed; output withheld: " + "; ".join(reasons))
+        if report.get("alignment_review_required") and (
+            not report.get("output_path") or not local_output.is_file() or local_output.stat().st_size == 0
+        ):
+            # A rejected partial map is review evidence, not a failed render.
+            reason = "Partial alignment has no accepted audio map; output requires review."
+            qc = {"status": "review", "stage": "partial_alignment",
+                  "policy_revision": fingerprint.get("qc_revision"), "failures": [],
+                  "review_reasons": [reason], "windows": []}
+            report["output_path"] = None
+            report["quality_check"] = _qc_summary(qc, fingerprint.get("qc_revision"))
+            atomic_json(local_report, report)
+            atomic_json(local_qc, qc)
+            atomic_json(report_path, report)
+            atomic_json(qc_path, qc)
+            progress = {"fingerprint": fingerprint, "phase": "alignment_review_required",
+                        "work_path": str(work), "report_signature": content_signature(report_path),
+                        "qc_signature": content_signature(qc_path)}
+            atomic_json(progress_path, progress)
+            return {"status": "needs_review", "confidence": float(report.get("confidence", 0)),
+                    "phase": progress["phase"], "error": reason}
         if not report or not local_output.is_file() or local_output.stat().st_size == 0:
             raise ValueError("Pipeline did not produce complete local media and report")
         report["output_path"] = str(destination)
@@ -179,6 +199,20 @@ def execute_transaction(spec: dict, config, *, run_pipeline: Callable, verify_me
             atomic_json(progress_path, progress)
             raise ValueError(f"{source.upper()} source changed during processing; publication refused")
     qc = read_record(local_qc)
+    alignment_review_required = bool(report.get("alignment_review_required"))
+    if alignment_review_required:
+        # Apply this even to cached passing QC; signal agreement cannot approve gaps.
+        reason = "Partial alignment contains gaps or ambiguity that require review."
+        if qc.get("status") == "pass":
+            qc["status"] = "review"
+        reasons = qc.setdefault("review_reasons", [])
+        if reason not in reasons:
+            reasons.append(reason)
+        atomic_json(local_qc, qc)
+        progress["local_qc_signature"] = content_signature(local_qc)
+        progress["qc_status"] = qc.get("status")
+        progress["phase"] = "alignment_review_required"
+        atomic_json(progress_path, progress)
     summary = _qc_summary(qc, fingerprint.get("qc_revision"))
     if report.get("quality_check") != summary:
         report["quality_check"] = summary
@@ -186,13 +220,15 @@ def execute_transaction(spec: dict, config, *, run_pipeline: Callable, verify_me
         progress["local_report_signature"] = content_signature(local_report)
         atomic_json(progress_path, progress)
     confidence = float(report.get("confidence", 0))
-    if qc.get("status") != "pass" or confidence < config.confidence_threshold:
+    if alignment_review_required or qc.get("status") != "pass" or confidence < config.confidence_threshold:
         # Save review evidence without placing unapproved media in the library.
         atomic_json(report_path, report)
         atomic_json(qc_path, qc)
         return {"status": "needs_review", "confidence": confidence,
                 "phase": progress["phase"], "retained_local_path": str(local_output),
-                "error": "Local quality checks require review; output has not been published."}
+                "error": ("Alignment requires review; output has not been published."
+                          if alignment_review_required else
+                          "Local quality checks require review; output has not been published.")}
 
     # If publication succeeded just before a crash, recognize exactly those
     # bytes. Never infer permission to replace a different existing output.
