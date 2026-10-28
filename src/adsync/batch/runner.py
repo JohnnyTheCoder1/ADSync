@@ -36,6 +36,7 @@ from adsync.quality import QC_POLICY_REVISION
 
 log = logging.getLogger("adsync")
 _SUCCESS = {"completed", "needs_review"}
+_LATER_SETTINGS = {"ad_stream"}
 
 
 class BatchStateError(RuntimeError):
@@ -481,7 +482,9 @@ def run_season(
         if "threads" in type(config).model_fields:
             worker_config["threads"] = threads_per_job
         worker_config["prepare_audio"] = prepare
-        content_config = {k: v for k, v in worker_config.items() if k not in {"threads", "device"}}
+        # Settings added after receipts existed join the fingerprint only once set, so old receipts stay valid.
+        content_config = {k: v for k, v in worker_config.items()
+                          if k not in {"threads", "device"} and not (k in _LATER_SETTINGS and v is None)}
         results: dict[str, EpisodeResult] = {}
         scheduled_jobs: dict[str, _Job] = {}
         pending: deque[_Job] = deque()
