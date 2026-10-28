@@ -91,6 +91,7 @@ def season(
     """Match, prepare and sync one or more seasons with hardware-sized workers."""
     from adsync.batch.content_pairing import LABEL_SOURCES
     from adsync.batch.discovery import DiscoveryIssue, EpisodeKey, discover_season
+    from adsync.media.output import destination_reachable
 
     try:
         if label_from not in LABEL_SOURCES:
@@ -104,6 +105,9 @@ def season(
         )
         video_folder, ad_folder = video_folder.resolve(), ad_folder.resolve()
         destination = (output_dir or video_folder / "ADSync").expanduser().resolve()
+        if not dry_run and not destination_reachable(destination):
+            raise ValueError(f"The output location is not reachable: {Path(destination.anchor)}. "
+                             "Check that the network share or drive is available, then run again.")
         work = (state_dir or default_state_dir(video_folder, ad_folder, destination)).expanduser().resolve()
         discovery = discover_season(video_folder, ad_folder, destination,
                                     seasons=seasons, excluded_dirs=[work])
@@ -201,7 +205,7 @@ def season(
             raise typer.Exit(130)
         if any(result.counts.get(s, 0) for s in ("failed", "conflict", "canceled", "pending")):
             raise typer.Exit(2)
-        if issues or probe_issues or any(result.counts.get(s, 0) for s in ("needs_review", "skipped_needs_review")):
+        if issues or probe_issues or any(result.counts.get(s, 0) for s in ("needs_review", "skipped_needs_review", "skipped_unverified")):
             raise typer.Exit(1)
     except typer.Exit:
         raise

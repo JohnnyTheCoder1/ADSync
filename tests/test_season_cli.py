@@ -150,3 +150,11 @@ def test_explicit_missing_season_is_not_silently_ignored(tmp_path):
                                      "--season", "99", "--strict", "--dry-run"])
     assert result.exit_code == 2, result.output
     assert "99" in result.output
+
+
+def test_unreachable_output_share_stops_before_any_work(tmp_path):
+    video, ad = _folders(tmp_path)
+    share = "\\\\127.0.0.1\\adsync-test-missing-share\\Shows"
+    result = CliRunner().invoke(app, ["season", str(video), str(ad), "--output-dir", share, "--no-content-check"])
+    assert result.exit_code == 2, result.output
+    assert "not reachable" in result.output

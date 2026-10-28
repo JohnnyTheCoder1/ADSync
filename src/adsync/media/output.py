@@ -214,19 +214,33 @@ def _copy_publish(local_path: Path, destination: Path, *, expected_sha256: str |
         _copy_publish_locked(local_path, destination, expected, overwrite=overwrite)
 
 
+def destination_reachable(path: str | Path) -> bool:
+    """True when the drive or network share that would hold *path* answers."""
+    anchor = Path(path).anchor
+    return not anchor or Path(anchor).exists()
+
+
+def _remove_stale_partials(folder: Path) -> None:
+    # Only call under the volume lock: then no live publication on this machine owns a partial here.
+    for stale in folder.glob(".*.adsync-part"):
+        try:
+            stale.unlink()
+            log.info("Removed a partial file left by an interrupted publication: %s", stale)
+        except OSError:
+            log.warning("Could not remove stale partial file: %s", stale)
+
+
 def _copy_publish_locked(local_path: Path, destination: Path, expected_sha256: str,
                          *, overwrite: bool) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists() and not overwrite:
         raise FileExistsError(f"Output already exists: {destination}")
     log.info("Publishing completed output to %s", destination)
+    _remove_stale_partials(destination.parent)
     partial: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb", prefix=".adsync-", suffix=".adsync-part",
-            dir=destination.parent, delete=False,
-        ) as target:
-            partial = Path(target.name)
+        partial = destination.with_name(f".{destination.name}.adsync-part")
+        with partial.open("wb") as target:
             with local_path.open("rb") as source:
                 shutil.copyfileobj(source, target, length=4 * 1024 * 1024)
             target.flush()

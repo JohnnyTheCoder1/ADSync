@@ -44,20 +44,28 @@ def content_signature(path: str | Path) -> dict:
 
 
 def signature_matches(path: str | Path, signature: dict | None, *, verify_hash: bool = True) -> bool:
-    if not isinstance(signature, dict) or not signature.get("sha256"):
-        return False
     try:
-        path = Path(path)
-        stat = path.stat()
-        if not path.is_file() or stat.st_size <= 0:
-            return False
-        metadata = {"path": os.path.normcase(str(path.resolve())), "size": stat.st_size,
-                    "mtime_ns": stat.st_mtime_ns}
-        if any(signature.get(key) != value for key, value in metadata.items()):
-            return False
-        return not verify_hash or sha256_file(path) == signature["sha256"]
+        return _signature_holds(path, signature, verify_hash=verify_hash)
     except (OSError, ValueError):
         return False
+
+
+def _signature_holds(path: str | Path, signature: dict | None, *, verify_hash: bool) -> bool:
+    """Compare a file with its recorded signature; read failures propagate as OSError."""
+    if not isinstance(signature, dict) or not signature.get("sha256"):
+        return False
+    path = Path(path)
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return False
+    if not path.is_file() or stat.st_size <= 0:
+        return False
+    metadata = {"path": os.path.normcase(str(path.resolve())), "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns}
+    if any(signature.get(key) != value for key, value in metadata.items()):
+        return False
+    return not verify_hash or sha256_file(path) == signature["sha256"]
 
 
 def read_record(path: str | Path) -> dict:
@@ -69,23 +77,31 @@ def read_record(path: str | Path) -> dict:
 
 
 def commit_matches(path: str | Path, fingerprint: dict, *, verify_hash: bool = True) -> bool:
+    return commit_state(path, fingerprint, verify_hash=verify_hash) == "match"
+
+
+def commit_state(path: str | Path, fingerprint: dict, *, verify_hash: bool = True) -> str:
+    """"match", "mismatch", or "unreadable" when a committed artifact cannot be read right now."""
     commit = read_record(path)
     if commit.get("phase") != "transfer_verified" or commit.get("fingerprint") != fingerprint:
-        return False
+        return "mismatch"
     for artifact in ("output", "report", "qc"):
         signature = commit.get(f"{artifact}_signature", {})
         artifact_path = signature.get("path")
         if not artifact_path:
-            return False
-        # Avoid competing destination integrity reads across season workers.
-        if artifact == "output" and verify_hash:
-            with destination_publication_lock(artifact_path):
-                valid = signature_matches(artifact_path, signature)
-        else:
-            valid = signature_matches(artifact_path, signature, verify_hash=verify_hash)
+            return "mismatch"
+        try:
+            # Avoid competing destination integrity reads across season workers.
+            if artifact == "output" and verify_hash:
+                with destination_publication_lock(artifact_path):
+                    valid = _signature_holds(artifact_path, signature, verify_hash=True)
+            else:
+                valid = _signature_holds(artifact_path, signature, verify_hash=verify_hash)
+        except OSError:
+            return "unreadable"
         if not valid:
-            return False
-    return True
+            return "mismatch"
+    return "match"
 
 
 def execute_transaction(spec: dict, config, *, run_pipeline: Callable, verify_media_sync: Callable,

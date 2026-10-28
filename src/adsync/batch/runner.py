@@ -28,7 +28,7 @@ import psutil
 
 from adsync import __version__
 from adsync.config import SyncConfig
-from adsync.batch.transaction import (ALGORITHM_REVISION, commit_matches, content_signature,
+from adsync.batch.transaction import (ALGORITHM_REVISION, commit_matches, commit_state, content_signature,
                                       read_record, same_processing_identity, signature_matches)
 from adsync.media.output import validate_output_path
 from adsync.quality import QC_POLICY_REVISION
@@ -471,7 +471,14 @@ def run_season(
                 receipt = saved.get("receipt", saved)
                 # The worker's final commit is authoritative even if the parent
                 # died before copying its result into the season checkpoint.
-                completed = resume and commit_matches(result.commit_path, job.fingerprint)
+                committed = commit_state(result.commit_path, job.fingerprint) if resume else "mismatch"
+                if committed == "unreadable":
+                    result.status = "skipped_unverified"
+                    result.error = "The published output could not be read to verify it; it was left untouched."
+                    checkpoint(job, result)
+                    emit("skip", result)
+                    continue
+                completed = committed == "match"
                 review = (receipt.get("status") == "needs_review"
                           and signature_matches(receipt.get("retained_local_path", ""), receipt.get("local_signature"))
                           and signature_matches(result.report_path, receipt.get("report_signature"))
