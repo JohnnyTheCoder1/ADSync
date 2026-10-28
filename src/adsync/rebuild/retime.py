@@ -19,47 +19,36 @@ def retime_segment(
     y: NDArray[np.floating],
     sr: int,
     seg: SegmentMap,
+    *,
+    out_start: int,
+    length: int,
 ) -> NDArray[np.float32]:
-    """Cut [src_start, src_end] from *y* and resample to seg.stretch ratio.
+    """Render output samples ``[out_start, out_start + length)`` of *seg* from *y*.
 
-    Accepts 1-D (mono) or 2-D (channels, samples) input and returns the same
-    layout.  Cubic interpolation in 30-second blocks keeps memory bounded
-    on full-length films.  At typical stretch values (0.99–1.01) the ~17-cent
-    pitch shift is imperceptible.
-
-    Returns an owned float32 array — the caller is free to mutate it.
+    Source positions come from the segment's absolute mapping, so touching
+    segments meet without a gap or a jump. Stretch 1 copies samples verbatim;
+    other stretches use cubic interpolation in 30-second blocks to bound
+    memory. Accepts 1-D (mono) or 2-D (channels, samples) input and returns an
+    owned float32 array of the same layout.
     """
-    start_sample = int(seg.src_start * sr)
-    end_sample = int(seg.src_end * sr)
-    src = y[..., start_sample:end_sample]
-    src_len = src.shape[-1]
-
-    if src_len == 0:
-        return _empty_like(y, 0)
-
+    out = _empty_like(y, length)
+    if length == 0:
+        return out
     if abs(seg.stretch - 1.0) <= 1e-6:
-        return src.astype(np.float32, copy=True)
+        first = out_start - round((seg.dst_start - seg.src_start) * sr)
+        lo, hi = max(first, 0), min(first + length, y.shape[-1])
+        out[...] = 0.0
+        if hi > lo:
+            out[..., lo - first:hi - first] = y[..., lo:hi]
+        return out
 
-    target_len = int(src_len * seg.stretch)
-    if target_len == 0:
-        return _empty_like(y, 0)
-
-    log.debug(
-        "Resampling [%.1f–%.1f] stretch=%.6f (%d → %d samples)",
-        seg.src_start, seg.src_end, seg.stretch, src_len, target_len,
-    )
-
-    src = np.ascontiguousarray(src, dtype=np.float32)
-    out = _empty_like(y, target_len)
-    scale = (src_len - 1) / max(target_len - 1, 1)
+    log.debug("Resampling [%.1f–%.1f] stretch=%.6f (%d samples)", seg.src_start, seg.src_end, seg.stretch, length)
     block = sr * _BLOCK_SECONDS
-
-    for start in range(0, target_len, block):
-        end = min(start + block, target_len)
-        pos = np.arange(start, end, dtype=np.float64)
-        pos *= scale
-        catmull_rom_interp(src, pos, out[..., start:end])
-
+    for start in range(0, length, block):
+        end = min(start + block, length)
+        seconds = (out_start + np.arange(start, end, dtype=np.float64)) / sr
+        positions = (seg.src_start + (seconds - seg.dst_start) / seg.stretch) * sr
+        catmull_rom_interp(y, positions, out[..., start:end])
     return out
 
 

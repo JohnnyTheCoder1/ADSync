@@ -47,7 +47,8 @@ def test_negative_destination_crops_source_and_preserves_input(channels):
     y = _signal(5, channels)
     original = y.copy()
     out = stitch_segments(y, SR, [_segment(-2.0, 5.0)], 10.0)
-    np.testing.assert_array_equal(out[..., :3 * SR], original[..., 2 * SR:])
+    kept = 3 * SR - 10  # the last 10 ms fade into the silence that follows
+    np.testing.assert_array_equal(out[..., :kept], original[..., 2 * SR:2 * SR + kept])
     assert np.count_nonzero(out[..., 3 * SR:]) == 0
     np.testing.assert_array_equal(y, original)
 

@@ -9,6 +9,7 @@ from numpy.typing import NDArray
 
 from adsync.models import SegmentMap
 from adsync.rebuild.retime import retime_segment
+from adsync.utils.mathx import EDGE_FADE_MS, fade_edges
 
 log = logging.getLogger("adsync")
 
@@ -40,23 +41,15 @@ def stitch_segments(
     # can otherwise mix an older tail at full volume beneath a later segment.
     placed_end = 0
     for seg in sorted(segments, key=lambda s: s.dst_start):
-        dst_start = int(seg.dst_start * sr)
+        # Round both ends from absolute times so touching segments share a sample boundary.
         mapped_end = seg.dst_start + (seg.src_end - seg.src_start) * seg.stretch
-        if dst_start >= output_len or mapped_end <= 0.0:
+        dst_start = max(0, round(seg.dst_start * sr))
+        end = min(output_len, round(mapped_end * sr))
+        if end <= dst_start:
             continue
 
-        chunk = retime_segment(y, sr, seg)
-        chunk_len = chunk.shape[-1]
-        lo = max(0, -dst_start)
-        hi = min(chunk_len, output_len - dst_start)
-        if hi <= lo:
-            del chunk
-            continue
-
+        chunk = retime_segment(y, sr, seg, out_start=dst_start, length=end - dst_start)
         chunk -= chunk.mean(axis=-1, keepdims=True).astype(np.float32)
-        chunk = chunk[..., lo:hi]
-        dst_start += lo
-        end = dst_start + chunk.shape[-1]
 
         overlap = placed_end - dst_start
         if overlap > 0:
@@ -71,9 +64,19 @@ def stitch_segments(
             if stale_end > dst_start + xf_len:
                 output[..., dst_start + xf_len: stale_end] = 0.0
 
+        elif overlap < 0:
+            # Silence before this segment: fade out what precedes it and fade this one in.
+            fade = int(EDGE_FADE_MS * sr / 1000)
+            fade_edges(output, max(0, placed_end - fade), placed_end, sr, head=False, tail=True)
+            fade_edges(chunk, 0, chunk.shape[-1], sr, head=True, tail=False)
+
         output[..., dst_start:end] += chunk
         placed_end = max(placed_end, end)
         del chunk
+
+    if 0 < placed_end < output_len:
+        fade = int(EDGE_FADE_MS * sr / 1000)
+        fade_edges(output, max(0, placed_end - fade), placed_end, sr, head=False, tail=True)
 
     # Avoid allocating another full HQ-track array just to inspect its peak.
     block = 30 * sr
