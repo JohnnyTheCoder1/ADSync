@@ -139,16 +139,15 @@ def run_pipeline(
                         log.info("Analysis audio cache hit: %s", source.name)
 
         # Run independent uncached extractions in parallel.
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from concurrent.futures import ThreadPoolExecutor
         pair_workers = min(2, threads)
         extraction_threads = max(1, threads // pair_workers)
-        decoded = {}
         with ThreadPoolExecutor(max_workers=pair_workers, initializer=worker_initializer(threads)) as pool:
-            futures = {pool.submit(decode_analysis_audio, info, stream, config, threads=extraction_threads): index
-                       for index, (_, info, _, stream) in enumerate(source_specs)
-                       if cached_audio[index] is None}
-            for future in as_completed(futures):
-                decoded[futures[future]] = future.result()
+            jobs = {index: pool.submit(decode_analysis_audio, info, stream, config, threads=extraction_threads)
+                    for index, (_, info, _, stream) in enumerate(source_specs)
+                    if cached_audio[index] is None}
+            decoded = {index: job.result() for index, job in jobs.items()}
+        del jobs  # finished futures would keep the decoded audio alive
 
         # ── Step 3: Load & preprocess ────────────────────────────────────
         log.info("Step 3/12: Preprocessing audio")
@@ -308,7 +307,9 @@ def run_pipeline(
                 )
                 progress.update(drift_task, completed=11)
             drift_ppm = drift
-            anchors = drift_anchors
+            # The drift estimator measures at video times; reports map AD time to video time.
+            anchors = [a.model_copy(update={"source_time": a.target_time, "target_time": a.source_time})
+                       for a in drift_anchors]
 
             if fp_edits and mode == "auto" and offset_conf >= config.confidence_threshold:
                 log.warning(
@@ -330,7 +331,7 @@ def run_pipeline(
                 # rather than the global average offset, because stretching is
                 # anchored at t=0 in the source.
                 use_drift = (
-                    len(drift_anchors) >= 3 and abs(drift_ppm) > 10
+                    mode != "offset" and len(drift_anchors) >= 3 and abs(drift_ppm) > 10
                     and drift_conf >= config.confidence_threshold
                 )
                 if use_drift:
@@ -357,7 +358,7 @@ def run_pipeline(
                 )]
 
                 if use_drift:
-                    mode = "drift" if mode != "offset" else "offset"
+                    mode = "drift"
                     log.info(
                         "Mode: %s with drift correction (conf=%.3f, "
                         "base_offset=%.3f s (intercept), drift=%.1f ppm = %.3f s/hr)",
@@ -584,7 +585,7 @@ def run_pipeline(
                 if id(point) not in seen:
                     point.target_time += adjust
                     seen.add(id(point))
-        if adjust and mode in ("warp", "piecewise"):
+        if adjust:
             for anchor in anchors:
                 anchor.target_time += adjust
 
@@ -627,6 +628,7 @@ def run_pipeline(
         # Drop the analysis-rate audio (and features, unless we'll plot them)
         # before loading the HQ AD — keeps peak RSS down on long films.
         del y_vid, y_ad
+        cached_audio.clear()
         if not debug_dir:
             del vid_feat, ad_feat
 

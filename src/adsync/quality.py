@@ -673,6 +673,7 @@ def verify_media_sync(path: Path, *, work_dir: Path | None = None, report: Any =
             raise RuntimeError(f"Rendered audio decode failed: {process.stderr.decode(errors='replace')[-6000:]}")
         main, rate = sf.read(targets[0], dtype="float32")
         ad, other_rate = sf.read(targets[1], dtype="float32")
+        ad = _remove_playback_nudge(ad, rate, report)
         if rate != other_rate:
             raise RuntimeError("QC decode sample rates disagree")
         result = verify_audio_sync(main, ad, rate, **report_targets(report))
@@ -682,6 +683,17 @@ def verify_media_sync(path: Path, *, work_dir: Path | None = None, report: Any =
     result["output_signature"] = {"path": str(path.resolve()), "size": before[0], "mtime_ns": before[1]}
     result["audio_streams"] = {"main": main_stream.model_dump(), "description": ad_stream.model_dump()}
     return result
+
+
+def _remove_playback_nudge(ad: np.ndarray, sr: int, report: Any) -> np.ndarray:
+    """Undo a deliberate --offset-adjust so timing is judged against what the user asked for."""
+    data = report.model_dump() if hasattr(report, "model_dump") else (report or {})
+    shift = round(float(data.get("offset_adjust") or 0.0) * sr)
+    if shift > 0:
+        return np.concatenate([ad[shift:], np.zeros(shift, ad.dtype)])
+    if shift < 0:
+        return np.concatenate([np.zeros(-shift, ad.dtype), ad[:shift]])
+    return ad
 
 
 def verify_video_preservation(source: Path, output: Path) -> dict[str, Any]:
