@@ -28,7 +28,7 @@ from typing import Callable
 
 from adsync.models import MediaInfo, StreamInfo
 from adsync.media.output import staged_output, validate_output_path
-from adsync.utils.subprocesses import NO_WINDOW, FFmpegError, ffmpeg_prefix
+from adsync.utils.subprocesses import FFmpegError, ffmpeg_prefix, kill_tree, no_window
 
 log = logging.getLogger("adsync")
 
@@ -361,7 +361,7 @@ def _run_ffmpeg_with_progress(
         text=True,
         encoding="utf-8",
         errors="replace",
-        **NO_WINDOW,
+        **no_window(),
     )
     assert proc.stdout is not None
 
@@ -394,9 +394,9 @@ def _run_ffmpeg_with_progress(
         # Callback errors and Ctrl+C must release the output before the staging
         # context cleans up. Closing stdout alone can leave the encoder alive.
         if proc.poll() is None:
-            proc.kill()
+            kill_tree(proc)
         proc.wait()
-        drain.join()
+        drain.join(timeout=10)
         proc.stdout.close()
         if proc.stderr is not None:
             proc.stderr.close()

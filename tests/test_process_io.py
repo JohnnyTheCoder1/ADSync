@@ -1,6 +1,7 @@
 """FFmpeg and ffprobe calls survive non-ASCII metadata and never read the console."""
 
 import json
+import os
 import locale
 import subprocess
 import sys
@@ -135,3 +136,67 @@ def test_ffmpeg_children_never_inherit_console_input(monkeypatch, tmp_path, spaw
     command, kwargs = calls[0]
     assert "-nostdin" in command
     assert kwargs.get("stdin") == subprocess.DEVNULL
+
+
+_LAUNCHER = """
+import shutil, subprocess, sys
+sys.exit(subprocess.call([shutil.which("ffmpeg"), *sys.argv[1:]]))
+"""
+
+_FAILING_DECODE = """
+import os, sys, time
+import psutil
+from adsync.media import extract
+from adsync.media.probe import probe
+from adsync.utils import subprocesses
+
+launcher, source = sys.argv[1], sys.argv[2]
+subprocesses.ffmpeg_prefix = lambda: [sys.executable, launcher, "-nostdin", "-hide_banner"]
+
+def fail_after_first_read(stream, size_hint, *, lead_bytes=0):
+    stream.read(1 << 20)
+    raise RuntimeError("injected")
+
+extract._read_to_end = fail_after_first_read
+started = time.monotonic()
+try:
+    extract.decode_audio(probe(source), sr=48000, mono=False, sample_fmt="f32")
+except RuntimeError:
+    pass
+elapsed = time.monotonic() - started
+time.sleep(1.0)
+me = {os.getpid(), *(parent.pid for parent in psutil.Process().parents())}
+left = [(p.pid, p.info["name"]) for p in psutil.process_iter(["cmdline", "name"])
+        if p.pid not in me and source in " ".join(p.info["cmdline"] or [])]
+print("elapsed", round(elapsed, 2), "left", left)
+"""
+
+
+def test_failed_decode_stops_ffmpeg_even_behind_a_launcher(tmp_path):
+    # Package-manager shims (Chocolatey, Scoop) run the real ffmpeg as a child of the process we start.
+    import psutil
+
+    source = tmp_path / "surround.flac"
+    tones = "|".join(f"0.1*sin(2*PI*{f}*t)" for f in (310, 410, 510, 610, 710, 810))
+    _ffmpeg("-f", "lavfi", "-i", f"aevalsrc={tones}:s=48000:d=120:c=5.1", "-c:a", "flac", source)
+    (tmp_path / "launcher.py").write_text(_LAUNCHER, encoding="utf-8")
+    (tmp_path / "scenario.py").write_text(_FAILING_DECODE, encoding="utf-8")
+    try:
+        result = subprocess.run([sys.executable, str(tmp_path / "scenario.py"), str(tmp_path / "launcher.py"), str(source)],
+                                capture_output=True, text=True, timeout=30)
+    finally:
+        for proc in psutil.process_iter(["cmdline"]):
+            if str(source) in " ".join(proc.info["cmdline"] or []):
+                proc.kill()
+    assert "left []" in result.stdout, result.stdout + result.stderr
+    assert float(result.stdout.split("elapsed")[1].split()[0]) < 10
+
+
+def test_tools_share_an_existing_console_so_ctrl_c_reaches_them(monkeypatch):
+    from adsync.utils import subprocesses
+
+    monkeypatch.setattr(subprocesses, "_has_console", lambda: True)
+    assert subprocesses.no_window() == {}
+    monkeypatch.setattr(subprocesses, "_has_console", lambda: False)
+    expected = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+    assert subprocesses.no_window() == expected

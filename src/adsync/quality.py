@@ -23,7 +23,7 @@ from adsync.align.fingerprint import FingerprintResult, fingerprint_align
 from adsync.models import MediaInfo, StreamInfo
 from adsync.quality_policy import QC_DECISION_POLICY_REVISION, evaluate_quality_policy
 from adsync.quality_targets import QC_TARGETS_REVISION, raw_offset_windows
-from adsync.utils.subprocesses import NO_WINDOW, ffmpeg_prefix
+from adsync.utils.subprocesses import ffmpeg_prefix, run_tool
 
 
 QC_POLICY_REVISION = "distributed-identity-local-signal-v6+" + QC_DECISION_POLICY_REVISION + "+" + QC_TARGETS_REVISION
@@ -667,8 +667,7 @@ def verify_media_sync(path: Path, *, work_dir: Path | None = None, report: Any =
             command += ["-map", f"0:{stream.index}", "-vn", "-sn", "-dn",
                         "-af", "aresample=async=1:first_pts=0", "-ac", "1", "-ar", "16000",
                         "-c:a", "pcm_f32le", "-threads", "2", str(target)]
-        process = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE, timeout=3600, **NO_WINDOW)
+        process = run_tool(command, timeout=3600)
         if process.returncode or process.stderr.strip():
             raise RuntimeError(f"Rendered audio decode failed: {process.stderr.decode(errors='replace')[-6000:]}")
         main, rate = sf.read(targets[0], dtype="float32")
@@ -705,10 +704,10 @@ def verify_video_preservation(source: Path, output: Path) -> dict[str, Any]:
     import re
 
     def packet_hashes(path: Path) -> list[str]:
-        result = subprocess.run([
+        result = run_tool([
             *ffmpeg_prefix(), "-v", "error", "-xerror", "-threads", "2", "-i", str(path),
             "-map", "0:v", "-c:v", "copy", "-f", "streamhash", "-hash", "sha256", "-",
-        ], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3600, **NO_WINDOW)
+        ], timeout=3600)
         if result.returncode or result.stderr.strip():
             raise RuntimeError(f"Video preservation hashing failed: {result.stderr.decode(errors='replace')[-6000:]}")
         hashes = re.findall(r"\d+,v,SHA256=([0-9a-fA-F]{64})", result.stdout.decode())

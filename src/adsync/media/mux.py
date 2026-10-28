@@ -14,7 +14,7 @@ from adsync.media.container import mkv_stream_plan
 from adsync.media.output import staged_output
 from adsync.models import StreamInfo
 from adsync.utils.progress import Progress
-from adsync.utils.subprocesses import FFmpegError, run_ffmpeg_streamed
+from adsync.utils.subprocesses import FFmpegError, kill_tree, run_ffmpeg_streamed
 
 # ~2 MB per chunk at 4 bytes / sample → constant memory overhead
 _CHUNK_SAMPLES = 512 * 1024
@@ -146,7 +146,7 @@ def _mux_ad_track(
             # Stop before closing buffered stdin so flushing cannot hang after
             # cancellation or a conversion error while FFmpeg has stopped reading.
             if proc.poll() is None:
-                proc.kill()
+                kill_tree(proc)
             raise
         finally:
             try:
@@ -157,9 +157,9 @@ def _mux_ad_track(
     finally:
         # Reap the encoder before staged_output attempts to remove its file.
         if proc.poll() is None:
-            proc.kill()
+            kill_tree(proc)
         proc.wait()
-        drain.join()
+        drain.join(timeout=10)
         if proc.stderr is not None:
             proc.stderr.close()
 

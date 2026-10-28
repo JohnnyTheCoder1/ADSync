@@ -2,18 +2,53 @@
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import shutil
 import subprocess
 from pathlib import Path
 
+import psutil
+
 from adsync.hardware import effective_thread_count
 
 log = logging.getLogger("adsync")
 
-# Tool processes never get a console window, even when the host has none (pythonw, GUIs).
-NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
+def _has_console() -> bool:
+    return os.name != "nt" or bool(ctypes.windll.kernel32.GetConsoleWindow())
+
+
+def no_window() -> dict:
+    """Popen options: share an existing console so Ctrl+C reaches ffmpeg; otherwise open no window."""
+    return {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" and not _has_console() else {}
+
+
+def kill_tree(proc: subprocess.Popen) -> None:
+    """Kill *proc* and its descendants; package-manager shims run the real ffmpeg as a child."""
+    try:
+        family = psutil.Process(proc.pid).children(recursive=True)
+    except psutil.Error:
+        family = []
+    proc.kill()
+    for member in family:
+        try:
+            member.kill()
+        except psutil.Error:
+            pass
+
+
+def run_tool(cmd: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[bytes]:
+    """Run a tool with captured output; on any interruption the whole process tree is stopped."""
+    with subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, **no_window()) as proc:
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except BaseException:
+            kill_tree(proc)
+            raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
 def _find_binary(name: str) -> str:
@@ -108,7 +143,7 @@ def run_ffmpeg(args: list[str], *, check: bool = True, threads: int | None = Non
     """
     cmd = ffmpeg_command(args, threads=threads)
     log.debug("ffmpeg %s", " ".join(args))
-    raw = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, check=False, **NO_WINDOW)
+    raw = run_tool(cmd)
     result = subprocess.CompletedProcess(cmd, raw.returncode, decode_output(raw.stdout), decode_output(raw.stderr))
     if check and result.returncode != 0:
         raise FFmpegError(result.returncode, result.stderr)
@@ -133,7 +168,7 @@ def run_ffmpeg_streamed(
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
-        **NO_WINDOW,
+        **no_window(),
     )
 
 
@@ -141,7 +176,7 @@ def run_ffprobe(args: list[str]) -> subprocess.CompletedProcess[str]:
     """Run an ffprobe command; raises CalledProcessError with decoded output on failure."""
     cmd = [_find_binary("ffprobe"), "-hide_banner", *args]
     log.debug("ffprobe %s", " ".join(args))
-    raw = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, check=False, **NO_WINDOW)
+    raw = run_tool(cmd)
     stdout, stderr = decode_output(raw.stdout), decode_output(raw.stderr)
     if raw.returncode != 0:
         raise subprocess.CalledProcessError(raw.returncode, cmd, stdout, stderr)

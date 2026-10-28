@@ -61,7 +61,7 @@ def test_ffmpeg_limits_apply_to_each_decoder_encoder_and_filters(monkeypatch, en
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(subprocesses, "_find_binary", lambda name: name)
-    monkeypatch.setattr(subprocesses.subprocess, "run", run)
+    monkeypatch.setattr(subprocesses, "run_tool", run)
     monkeypatch.setattr(subprocesses.subprocess, "Popen", run)
     args = ["-i", "video.mkv", "-f", "f32le", "-i", "pipe:0", "-c:a", "libopus", "output.mkv"]
     original = args.copy()
@@ -81,7 +81,7 @@ def test_ffmpeg_environment_thread_budget_is_used_without_explicit_argument(monk
     captured = []
     monkeypatch.setenv("ADSYNC_THREADS", "3")
     monkeypatch.setattr(subprocesses, "_find_binary", lambda name: name)
-    monkeypatch.setattr(subprocesses.subprocess, "run", lambda cmd, **kw: (captured.append(cmd) or SimpleNamespace(returncode=0, stdout=b"", stderr=b"")))
+    monkeypatch.setattr(subprocesses, "run_tool", lambda cmd, **kw: (captured.append(cmd) or SimpleNamespace(returncode=0, stdout=b"", stderr=b"")))
     subprocesses.run_ffmpeg(["-i", "a.wav", "b.wav"])
     assert captured[0][-3:] == ["-threads", "3", "b.wav"]
 

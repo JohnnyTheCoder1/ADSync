@@ -13,7 +13,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from adsync.models import MediaInfo, StreamInfo
-from adsync.utils.subprocesses import NO_WINDOW, FFmpegError, ffmpeg_command
+from adsync.utils.subprocesses import FFmpegError, ffmpeg_command, kill_tree, no_window
 
 log = logging.getLogger("adsync")
 
@@ -50,7 +50,7 @@ def decode_audio(
     ]
     proc = subprocess.Popen(
         ffmpeg_command(args, threads=threads),
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **NO_WINDOW,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **no_window(),
     )
     errors: list[bytes] = []
     drain = threading.Thread(target=lambda: errors.append(proc.stderr.read()), daemon=True)
@@ -65,9 +65,9 @@ def decode_audio(
         proc.wait()
     finally:
         if proc.poll() is None:
-            proc.kill()
+            kill_tree(proc)
         proc.wait()
-        drain.join()
+        drain.join(timeout=10)
         proc.stdout.close()
         proc.stderr.close()
     if proc.returncode != 0:
