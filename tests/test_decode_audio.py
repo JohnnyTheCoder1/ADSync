@@ -81,3 +81,16 @@ def test_speed_correction_uses_the_analysis_time_scale(tmp_path):
         expected = t * up / down
         window = y[int((expected - 0.05) * sr):int((expected + 0.05) * sr)]
         assert abs(expected - 0.05 + np.argmax(np.abs(window)) / sr - expected) <= 0.0005
+
+
+def test_full_quality_decode_runs_near_pipe_speed(tmp_path):
+    # 5 minutes of 5.1 float audio (330 MB); asking a Windows pipe for the whole remaining buffer per read took ~30x longer.
+    import time
+
+    tones = "|".join(f"0.1*sin(2*PI*{f}*t)" for f in (310, 410, 510, 610, 710, 810))
+    source = tmp_path / "long.flac"
+    _ffmpeg("-f", "lavfi", "-i", f"aevalsrc={tones}:s=48000:d=300:c=5.1", "-c:a", "flac", source)
+    started = time.perf_counter()
+    decoded = decode_audio(probe(source), sr=48000, mono=False, sample_fmt="f32")
+    assert decoded.shape == (6, 300 * 48000)
+    assert time.perf_counter() - started < 3.0

@@ -19,6 +19,7 @@ log = logging.getLogger("adsync")
 
 _SAMPLE_FORMATS = {"s16": ("pcm_s16le", np.dtype("<i2")), "f32": ("pcm_f32le", np.dtype("<f4"))}
 _UNKNOWN_DURATION_SEC = 600.0  # initial buffer when the probe reports no duration
+_READ_CHUNK = 4 << 20
 
 
 def decode_audio(
@@ -142,7 +143,8 @@ def _read_to_end(stream: BinaryIO, size_hint: int, *, lead_bytes: int = 0) -> ND
             grown = np.empty(buf.size + buf.size // 2, dtype=np.uint8)
             grown[:filled] = buf
             buf = grown
-        count = stream.readinto(memoryview(buf)[filled:])
+        # Bounded reads: Windows pipe reads cost time in proportion to the requested size, not the bytes returned.
+        count = stream.readinto(memoryview(buf)[filled:filled + _READ_CHUNK])
         if not count:
             break
         filled += count
