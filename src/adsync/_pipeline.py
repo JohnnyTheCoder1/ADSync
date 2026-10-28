@@ -34,7 +34,7 @@ def run_pipeline(
     from adsync.align.drift import estimate_drift
     from adsync.align.global_offset import estimate_global_offset
     from adsync.align.piecewise_map import build_piecewise_map
-    from adsync.features.analysis_audio import decode_analysis_audio
+    from adsync.features.analysis_audio import ad_analysis_stream, decode_analysis_audio
     from adsync.features.extract_basic import extract_basic_features
     from adsync.features.preprocess import preprocess
     from adsync.media.extract import decode_audio
@@ -91,7 +91,12 @@ def run_pipeline(
         vid_wav = workdir.child("video_audio.wav")
         ad_wav = workdir.child("ad_audio.wav")
         ad_hq_wav = workdir.child("ad_audio_hq.wav")
-        ad_hq_sr = ad_info.audio_streams[0].sample_rate or config.output_sr
+        ad_stream_index = ad_analysis_stream(ad_info, config)
+        ad_stream = next((s for s in ad_info.audio_streams if s.index == ad_stream_index), ad_info.audio_streams[0])
+        ad_hq_sr = ad_stream.sample_rate or config.output_sr
+        if ad_stream_index is not None:
+            log.info("AD audio: stream %d (lang=%s, %s)", ad_stream.index, ad_stream.language or "untagged",
+                     ad_stream.title or "untitled")
 
         # On multi-audio sources, analyze the stream matching the AD language
         # rather than blindly the first — dual-audio releases often put a dub
@@ -122,7 +127,7 @@ def run_pipeline(
         source_options = [None, None]
         cached_audio = [None, None]
         source_specs = [(video_path, video_info, vid_wav, vid_audio_index),
-                        (ad_path, ad_info, ad_wav, None)]
+                        (ad_path, ad_info, ad_wav, ad_stream_index)]
         if cache is not None:
             for index, (source, _, _, stream) in enumerate(source_specs):
                 if source.is_file():
@@ -632,7 +637,7 @@ def run_pipeline(
         if (mux or debug_dir) and not identity_failed:
             log.info("Step 9/12: Rebuilding synced AD track (HQ)")
             y_ad_hq = decode_audio(
-                ad_info, sr=ad_hq_sr, mono=False,
+                ad_info, stream_index=ad_stream_index, sr=ad_hq_sr, mono=False,
                 speed_ratio=speed_stretch, sample_fmt="f32",
                 threads=threads,
             )

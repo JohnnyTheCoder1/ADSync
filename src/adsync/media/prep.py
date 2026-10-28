@@ -18,6 +18,7 @@ Speed notes, measured on a 2 h film (HE-AAC 5.1 source, NVMe):
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import threading
 import time
@@ -164,6 +165,7 @@ def pick_audio_stream(
     if language:
         want = language.lower()[:2]
         matches = [s for s in streams if (s.language or "").lower()[:2] == want]
+        matches = [s for s in matches if not is_description(s)] or matches
         if matches:
             return max(matches, key=lambda s: s.channels or 0)
         if len(streams) == 1:
@@ -184,7 +186,44 @@ def pick_audio_stream(
             "Re-run with --audio-index <n> to choose one explicitly."
         )
 
-    return max(streams, key=lambda s: s.channels or 0)
+    return max([s for s in streams if not is_description(s)] or streams, key=lambda s: s.channels or 0)
+
+
+_DESCRIPTION_TITLE = re.compile(r"audio[ -]?descri|descri(bed|ptive)|visually[ -]impaired", re.IGNORECASE)
+_AD_TAG = re.compile(r"\bAD\b")
+
+
+def is_description(stream: StreamInfo) -> bool:
+    """True for a stream flagged or titled as audio description."""
+    title = stream.title or ""
+    return stream.visual_impaired or bool(_DESCRIPTION_TITLE.search(title) or _AD_TAG.search(title))
+
+
+def pick_ad_stream(info: MediaInfo, *, language: str | None = "eng", index: int | None = None) -> StreamInfo:
+    """Choose the description stream of an AD source.
+
+    An explicit *index* wins and a lone stream is used as is. Otherwise the
+    stream flagged for the visually impaired or titled as a description is
+    used, preferring *language*; anything less certain raises.
+    """
+    streams = info.audio_streams
+    if not streams:
+        raise ValueError(f"No audio streams in {info.path}")
+    if index is not None:
+        return pick_audio_stream(info, audio_index=index)
+    if len(streams) == 1:
+        return streams[0]
+    described = [s for s in streams if is_description(s)]
+    if language and len(described) > 1:
+        want = language.lower()[:2]
+        described = [s for s in described if (s.language or "").lower()[:2] == want] or described
+    if len(described) == 1:
+        return described[0]
+    raise ValueError(
+        f"Cannot tell which audio stream of {Path(info.path).name} is the description.\n"
+        f"{_format_streams(streams)}\n"
+        "Re-run with --ad-stream <n> to choose one explicitly."
+    )
 
 
 def _format_streams(streams: list[StreamInfo]) -> str:
@@ -194,6 +233,7 @@ def _format_streams(streams: list[StreamInfo]) -> str:
             f"  index {s.index}: {s.codec_name or '?'}  lang={s.language or 'untagged'}  "
             f"{s.channels or '?'}ch ({s.channel_layout or 'unknown layout'})"
             + (f"  title={s.title!r}" if s.title else "")
+            + ("  visually impaired" if s.visual_impaired else "")
         )
     return "\n".join(lines)
 

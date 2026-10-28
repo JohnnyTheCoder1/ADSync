@@ -49,6 +49,7 @@ def probe(path: str | Path) -> MediaInfo:
             title=tags.get("title"),
             duration=_float_or_none(s.get("duration") or fmt.get("duration")),
             start_time=_float_or_none(s.get("start_time")),
+            visual_impaired=bool((s.get("disposition") or {}).get("visual_impaired")),
         )
 
         if codec_type == "video":

@@ -22,6 +22,7 @@ class StreamInfo(BaseModel):
     title: str | None = None
     duration: float | None = None
     start_time: float | None = None
+    visual_impaired: bool = False
 
 
 class MediaInfo(BaseModel):

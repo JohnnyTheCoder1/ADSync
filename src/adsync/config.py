@@ -39,6 +39,7 @@ class SyncConfig(BaseModel):
     prepare_audio: bool = Field(False, description="Keep requested original language and prepare stereo during final mux")
     ad_language: str = Field("eng", description="Language tag for AD track")
     ad_title: str = Field("Audio Description", description="Title for AD track")
+    ad_stream: int | None = Field(None, description="Audio stream index of the description in the AD file")
     output_sr: int = Field(48000, description="Sample rate for final output audio")
     output_codec: str = Field("libopus", description="Audio codec for AD track (libopus or aac)")
     output_bitrate: str = Field("96k", description="Bitrate for output AD track")

@@ -19,6 +19,15 @@ def analysis_stream(info: MediaInfo, config: SyncConfig) -> int | None:
     return pick_audio_stream(info, language=config.ad_language, strict=config.prepare_audio).index
 
 
+def ad_analysis_stream(info: MediaInfo, config: SyncConfig) -> int | None:
+    """The AD file's description stream, or None for the only stream."""
+    if config.ad_stream is None and len(info.audio_streams) <= 1:
+        return None
+    from adsync.media.prep import pick_ad_stream
+
+    return pick_ad_stream(info, language=config.ad_language, index=config.ad_stream).index
+
+
 def analysis_cache_options(stream: int | None, config: SyncConfig) -> dict:
     return {
         "kind": "preprocessed-audio", "stream": stream,

@@ -269,12 +269,12 @@ def _ad_reason(ad: Recording, hits: list[int], videos, used_videos, video_hits) 
 
 def load_recording_features(path: Path, config: SyncConfig, *, video: bool, threads: int = 1) -> FingerprintFeatures:
     """Fingerprint the same analysis audio alignment uses, sharing its cache entries."""
-    from adsync.features.analysis_audio import analysis_stream, load_analysis_audio
+    from adsync.features.analysis_audio import ad_analysis_stream, analysis_stream, load_analysis_audio
     from adsync.media.probe import probe
     from adsync.quality import fingerprint_features
 
     info = probe(path)
-    stream = analysis_stream(info, config) if video else None
+    stream = analysis_stream(info, config) if video else ad_analysis_stream(info, config)
     audio = load_analysis_audio(path, info, stream, config, threads=threads)
     return fingerprint_features(audio, config.analysis_sr)
 

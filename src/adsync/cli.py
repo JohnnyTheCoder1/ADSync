@@ -72,6 +72,7 @@ def sync(
     debug_dir: Optional[Path] = typer.Option(None, "--debug-dir"),
     language: str = typer.Option("eng", "--language"),
     ad_title: str = typer.Option("Audio Description", "--ad-title"),
+    ad_stream: Optional[int] = typer.Option(None, "--ad-stream", help="Audio stream index of the description when the AD file has several"),
     confidence_threshold: float = typer.Option(0.70, "--confidence-threshold"),
     max_stretch: float = typer.Option(0.01, "--max-stretch"),
     crossfade_ms: int = typer.Option(80, "--crossfade-ms"),
@@ -107,6 +108,7 @@ def sync(
         crossfade_ms=crossfade_ms,
         ad_language=language,
         ad_title=ad_title,
+        ad_stream=ad_stream,
         mode=mode,
         offset_adjust=offset_adjust,
         output_codec=codec,
@@ -224,11 +226,12 @@ def analyze(
     device: Device = typer.Option(Device.auto, "--device", envvar="ADSYNC_DEVICE", help="Correlation device: auto, cpu, cuda"),
     threads: Optional[int] = typer.Option(None, "--threads", min=1, envvar="ADSYNC_THREADS", help="CPU thread budget for this run"),
     analysis_sr: int = typer.Option(16000, "--analysis-sr"),
+    ad_stream: Optional[int] = typer.Option(None, "--ad-stream", help="Audio stream index of the description when the AD file has several"),
 ) -> None:
     """Run analysis only — no final mux."""
     _validate_inputs(video, ad_audio)
 
-    config = SyncConfig(analysis_sr=analysis_sr, mode=mode, device=device.value, threads=threads)
+    config = SyncConfig(analysis_sr=analysis_sr, mode=mode, device=device.value, threads=threads, ad_stream=ad_stream)
 
     from adsync._pipeline import run_pipeline
 
@@ -256,11 +259,12 @@ def debug(
     device: Device = typer.Option(Device.auto, "--device", envvar="ADSYNC_DEVICE", help="Correlation device: auto, cpu, cuda"),
     threads: Optional[int] = typer.Option(None, "--threads", min=1, envvar="ADSYNC_THREADS", help="CPU thread budget for this run"),
     analysis_sr: int = typer.Option(16000, "--analysis-sr"),
+    ad_stream: Optional[int] = typer.Option(None, "--ad-stream", help="Audio stream index of the description when the AD file has several"),
 ) -> None:
     """Analysis + dump intermediates (WAVs, plots, anchors, segment maps)."""
     _validate_inputs(video, ad_audio)
 
-    config = SyncConfig(analysis_sr=analysis_sr, mode=mode, device=device.value, threads=threads)
+    config = SyncConfig(analysis_sr=analysis_sr, mode=mode, device=device.value, threads=threads, ad_stream=ad_stream)
 
     from adsync._pipeline import run_pipeline
 
