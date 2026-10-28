@@ -8,12 +8,13 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from adsync.models import SyncReport
 from adsync.utils.io import write_json
 
 log = logging.getLogger("adsync")
-console = Console()
+console = Console(emoji=False, highlight=False)
 
 
 def write_report(report: SyncReport, path: Path | str) -> Path:
@@ -21,10 +22,10 @@ def write_report(report: SyncReport, path: Path | str) -> Path:
     return write_json(path, report.model_dump())
 
 
-def print_summary(report: SyncReport) -> None:
-    """Print a concise summary to the terminal."""
+def print_summary(report: SyncReport, *, threshold: float = 0.70) -> None:
+    """Print a concise summary as plain lines; the last line is the verdict."""
     console.print()
-    console.rule("[bold]ADSync Report[/bold]")
+    console.print("ADSync report", style="bold")
 
     # Key metrics
     table = Table(show_header=False, box=None, padding=(0, 2))
@@ -78,7 +79,7 @@ def print_summary(report: SyncReport) -> None:
         )
 
     if report.output_path:
-        table.add_row("Output", report.output_path)
+        table.add_row("Output", Text(report.output_path))
 
     console.print(table)
 
@@ -89,16 +90,17 @@ def print_summary(report: SyncReport) -> None:
         console.print()
         console.print("[bold yellow]Warnings:[/bold yellow]")
         for w in report.warnings:
-            console.print(f"  Warning: {w}")
+            console.print(f"  Warning: {w}", markup=False)
 
-    # Confidence interpretation
     console.print()
-    if report.confidence >= 0.90:
-        console.print("[bold green]High alignment confidence[/bold green]")
-    elif report.confidence >= 0.75:
-        console.print("[bold yellow]Medium confidence — review recommended[/bold yellow]")
+    if report.identity_check.get("status") == "fail":
+        console.print("Not synced: the video and AD could not be confirmed as the same content", style="bold red")
+    elif report.confidence >= max(0.90, threshold):
+        console.print("High alignment confidence", style="bold green")
+    elif report.confidence >= threshold:
+        console.print("Medium confidence, review recommended", style="bold yellow")
     else:
-        console.print("[bold red]Low confidence — debug review strongly recommended[/bold red]")
+        console.print(f"Low confidence, below the {threshold:.0%} threshold; review before use", style="bold red")
 
     console.print()
 

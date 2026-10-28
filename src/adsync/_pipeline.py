@@ -745,7 +745,7 @@ def run_pipeline(
             plot_features(vid_feat, ad_feat, workdir.subdir("plots"))
             plot_anchors(anchors, segments, workdir.subdir("plots"))
 
-        print_summary(report)
+        print_summary(report, threshold=config.confidence_threshold)
         return report
 
     finally:

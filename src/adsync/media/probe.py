@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 from pathlib import Path
 
 from adsync.models import MediaInfo, StreamInfo
-from adsync.utils.subprocesses import run_ffprobe
+from adsync.utils.subprocesses import _parse_ffmpeg_error, run_ffprobe
 
 log = logging.getLogger("adsync")
 
@@ -18,13 +19,11 @@ def probe(path: str | Path) -> MediaInfo:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
 
-    result = run_ffprobe([
-        "-v", "quiet",
-        "-print_format", "json",
-        "-show_format",
-        "-show_streams",
-        str(path),
-    ])
+    try:
+        result = run_ffprobe(["-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)])
+    except subprocess.CalledProcessError as exc:
+        reason = _parse_ffmpeg_error(exc.stderr or "").split(f"{path.name}: ", 1)[-1]
+        raise ValueError(f"Cannot read {path.name}: {reason}") from exc
 
     data = json.loads(result.stdout)
 

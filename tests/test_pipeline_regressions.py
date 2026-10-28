@@ -88,7 +88,7 @@ def pipeline_case(monkeypatch, tmp_path):
     monkeypatch.setattr("adsync.align.warp_decode.decode_warp_path", fake_decode)
     monkeypatch.setattr("adsync.align.warp_fit.fit_warp_function", fake_fit)
     monkeypatch.setattr("adsync.media.mux.mux_ad_track", fake_mux)
-    monkeypatch.setattr("adsync.report.json_report.print_summary", lambda report: None)
+    monkeypatch.setattr("adsync.report.json_report.print_summary", lambda report, **kwargs: None)
 
     def run(mode="offset", *, mux=False, offset_adjust=0.0, report_path=None, prepare_audio=False,
             fingerprint=False):

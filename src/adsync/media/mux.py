@@ -14,7 +14,7 @@ from adsync.media.container import mkv_stream_plan
 from adsync.media.output import staged_output
 from adsync.models import StreamInfo
 from adsync.utils.progress import Progress
-from adsync.utils.subprocesses import run_ffmpeg_streamed
+from adsync.utils.subprocesses import FFmpegError, run_ffmpeg_streamed
 
 # ~2 MB per chunk at 4 bytes / sample → constant memory overhead
 _CHUNK_SAMPLES = 512 * 1024
@@ -164,10 +164,7 @@ def _mux_ad_track(
             proc.stderr.close()
 
     if proc.returncode != 0 or stream_error is not None:
-        stderr = b"".join(stderr_buf)
-        raise subprocess.CalledProcessError(
-            proc.returncode if proc.returncode != 0 else 1, "ffmpeg", stderr=stderr,
-        )
+        raise FFmpegError(proc.returncode or 1, b"".join(stderr_buf))
 
     return output_path
 

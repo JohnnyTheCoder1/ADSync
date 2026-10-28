@@ -16,14 +16,20 @@ from adsync.config import SyncConfig
 from adsync.compute import CudaBackendError
 from adsync.logging import setup_logging
 from adsync.media.output import OutputPublicationError, resolve_output_path, validate_output_path
+from adsync.utils.subprocesses import FFmpegError
 
+# Plain help and plain tracebacks: box-drawn panels are noise to a screen reader.
 app = typer.Typer(
     name="adsync",
     help="Synchronize audio description tracks with video files.",
     add_completion=False,
-    rich_markup_mode="rich",
+    rich_markup_mode=None,
+    pretty_exceptions_enable=False,
 )
-console = Console()
+console = Console(emoji=False, highlight=False)
+
+# Failures a user can act on; anything else is a bug and keeps its traceback.
+_USER_ERRORS = (OutputPublicationError, CudaBackendError, FFmpegError, ValueError, OSError)
 
 
 class Device(str, Enum):
@@ -52,7 +58,7 @@ def main(
     try:
         check_dependencies()
     except FileNotFoundError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+        console.print(f"Error: {exc}", markup=False)
         raise typer.Exit(2)
 
     setup_logging(verbose=verbose)
@@ -99,34 +105,33 @@ def sync(
     output = resolve_output_path(video, output, output_dir)
     _validate_output(output, video, ad_audio)
 
-    config = SyncConfig(
-        device=device.value,
-        threads=threads,
-        analysis_sr=analysis_sr,
-        confidence_threshold=confidence_threshold,
-        max_stretch=max_stretch,
-        crossfade_ms=crossfade_ms,
-        ad_language=language,
-        ad_title=ad_title,
-        ad_stream=ad_stream,
-        mode=mode,
-        offset_adjust=offset_adjust,
-        output_codec=codec,
-        output_bitrate=bitrate,
-        warp_lambda_jump=warp_lambda_jump,
-        warp_lambda_curve=warp_lambda_curve,
-        warp_lambda_speech=warp_lambda_speech,
-        warp_max_candidates=warp_candidates,
-        warp_search_radius=warp_search_radius,
-        fingerprint=not no_fingerprint,
-        speed_detect=not no_speed_detect,
-        fp_anchor=not no_fp_anchor,
-        multiband=not no_multiband,
-    )
-
     from adsync._pipeline import run_pipeline
 
     try:
+        config = SyncConfig(
+            device=device.value,
+            threads=threads,
+            analysis_sr=analysis_sr,
+            confidence_threshold=confidence_threshold,
+            max_stretch=max_stretch,
+            crossfade_ms=crossfade_ms,
+            ad_language=language,
+            ad_title=ad_title,
+            ad_stream=ad_stream,
+            mode=mode,
+            offset_adjust=offset_adjust,
+            output_codec=codec,
+            output_bitrate=bitrate,
+            warp_lambda_jump=warp_lambda_jump,
+            warp_lambda_curve=warp_lambda_curve,
+            warp_lambda_speech=warp_lambda_speech,
+            warp_max_candidates=warp_candidates,
+            warp_search_radius=warp_search_radius,
+            fingerprint=not no_fingerprint,
+            speed_detect=not no_speed_detect,
+            fp_anchor=not no_fp_anchor,
+            multiband=not no_multiband,
+        )
         result = run_pipeline(
             video_path=video,
             ad_path=ad_audio,
@@ -137,10 +142,14 @@ def sync(
             keep_temp=keep_temp,
             mux=True,
         )
-    except (OutputPublicationError, CudaBackendError, ValueError) as exc:
+    except _USER_ERRORS as exc:
         console.print(f"Error: {exc}", markup=False)
         raise typer.Exit(2)
 
+    if result.output_path is None:
+        reasons = "; ".join(result.identity_check.get("reasons", []))
+        console.print(f"No output written{': ' + reasons if reasons else '.'}", markup=False)
+        raise typer.Exit(1)
     raise typer.Exit(0 if result.confidence >= config.confidence_threshold else 1)
 
 
@@ -197,13 +206,12 @@ def prep(
             limiter=not no_limiter,
             on_progress=_print_progress,
         )
-    except (OutputPublicationError, ValueError) as exc:
+    except _USER_ERRORS as exc:
         console.print(f"Error: {exc}", markup=False)
         raise typer.Exit(2)
 
     console.print(
-        f"[green]Prepped → {result.output_path}[/green]  "
-        f"({result.elapsed_sec:.0f} s, audio={result.audio_codec})"
+        f"Prepped: {result.output_path} ({result.elapsed_sec:.0f} s, audio={result.audio_codec})", markup=False,
     )
 
 
@@ -302,10 +310,10 @@ def mux(
 
     try:
         mux_ad_file(video, ad_audio, output, language=language, title=ad_title)
-    except (OutputPublicationError, ValueError) as exc:
+    except _USER_ERRORS as exc:
         console.print(f"Error: {exc}", markup=False)
         raise typer.Exit(2)
-    console.print(f"[green]Muxed → {output}[/green]")
+    console.print(f"Muxed: {output}", markup=False)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -333,7 +341,7 @@ def _run_analysis(**kwargs):
     from adsync._pipeline import run_pipeline
     try:
         result = run_pipeline(**kwargs)
-    except (CudaBackendError, ValueError) as exc:
+    except _USER_ERRORS as exc:
         console.print(f"Error: {exc}", markup=False)
         raise typer.Exit(2)
     raise typer.Exit(0 if result.confidence >= kwargs["config"].confidence_threshold else 1)
@@ -350,7 +358,7 @@ def _validate_output(output: Path, *inputs: Path) -> None:
 def _validate_inputs(*paths: Path) -> None:
     for p in paths:
         if not p.exists():
-            console.print(f"[red]Error:[/red] File not found: {p}")
+            console.print(f"Error: File not found: {p}", markup=False)
             raise typer.Exit(2)
 
 
