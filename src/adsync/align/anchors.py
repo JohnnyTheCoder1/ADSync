@@ -14,6 +14,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.signal import fftconvolve
 
+from adsync.compute import sliding_window_energy
 from adsync.models import Anchor, FeatureBundle
 
 log = logging.getLogger("adsync")
@@ -78,13 +79,11 @@ def find_anchors(
         if n_pos == 0:
             continue
 
-        # Per-position energy normalization via cumulative sum of squares
-        v_sq = v_region ** 2
-        cs = np.empty(len(v_sq) + 1, dtype=np.float64)
-        cs[0] = 0.0
-        np.cumsum(v_sq, out=cs[1:])
-        v_norms = np.sqrt(np.maximum(cs[win_frames:win_frames + n_pos] - cs[:n_pos], 1e-20))
-        norm_corr = raw_corr / (ad_energy * v_norms)
+        v_energy, usable = sliding_window_energy(np, v_region, win_frames)
+        if not usable.any():
+            continue
+        v_norms = np.sqrt(np.where(usable, v_energy, 1.0))
+        norm_corr = np.where(usable, raw_corr / (ad_energy * v_norms), 0.0)
 
         peak_idx = int(np.argmax(norm_corr))
         best_score = float(norm_corr[peak_idx])

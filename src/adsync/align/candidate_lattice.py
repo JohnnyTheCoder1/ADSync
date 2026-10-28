@@ -7,15 +7,16 @@ against repetitive musical content, with speech-likeness scoring per window.
 from __future__ import annotations
 
 import logging
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
 import librosa
 import numpy as np
 from numpy.typing import NDArray
-from scipy.signal import butter, fftconvolve, find_peaks, sosfiltfilt
+from scipy.signal import butter, find_peaks, sosfiltfilt
 
+from adsync.compute import CorrelationBackend
+from adsync.hardware import effective_thread_count, worker_initializer
 from adsync.models import CandidateWindow, FeatureBundle, OffsetCandidate
 
 log = logging.getLogger("adsync")
@@ -45,6 +46,8 @@ def build_candidate_lattice(
     max_candidates: int = 5,
     multiband: bool = True,
     on_progress: Callable[[int, int], None] | None = None,
+    compute: CorrelationBackend | None = None,
+    threads: int | None = None,
 ) -> list[CandidateWindow]:
     """Scan the AD track in windows and keep top-K offset candidates per window.
 
@@ -62,6 +65,7 @@ def build_candidate_lattice(
 
     Returns a list of :class:`CandidateWindow`, one per analysis position.
     """
+    compute = compute if compute is not None else CorrelationBackend("cpu")
     # Decide signal source: raw audio (preferred) or onset features
     if y_vid is not None and y_ad is not None:
         ds_factor = max(1, audio_sr // 4000)
@@ -155,17 +159,8 @@ def build_candidate_lattice(
                 return None
             v_reg = np.asarray(v_reg_in, np.float64)
             v_reg = v_reg - np.mean(v_reg)
-            raw = fftconvolve(v_reg, a_seg[::-1], mode="valid")
-            if len(raw) == 0:
-                return None
-            v_sq = v_reg ** 2
-            cs_b = np.empty(len(v_sq) + 1, dtype=np.float64)
-            cs_b[0] = 0.0
-            np.cumsum(v_sq, out=cs_b[1:])
-            v_norms_b = np.sqrt(np.maximum(
-                cs_b[win_samples: win_samples + len(raw)] - cs_b[:len(raw)], 1e-20,
-            ))
-            return raw / (a_energy * v_norms_b)
+            result = compute.normalized_correlation(v_reg, a_seg, template_energy=a_energy)
+            return result if len(result) else None
 
         v_full = vid[search_start:search_end]
         a_full = ad[ad_start: ad_start + win_samples]
@@ -301,11 +296,14 @@ def build_candidate_lattice(
 
     slots: list[list[CandidateWindow]] = []
     if total_windows:
-        n_workers = min(32, os.cpu_count() or 1, total_windows)
+        # The compute backend funnels GPU calls through one device worker,
+        # bounding FFT memory and plan caches. CPU preprocessing, small auto
+        # correlations, and peak picking can still run concurrently here.
+        n_workers = min(32, effective_thread_count(threads), total_windows)
         chunk_len = max(1, min(64, total_windows // (n_workers * 4) or 1))
         bounds = list(range(0, total_windows, chunk_len))
         slots = [[] for _ in bounds]
-        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        with ThreadPoolExecutor(max_workers=n_workers, initializer=worker_initializer(threads, native_threads=1)) as pool:
             futures = {
                 pool.submit(_chunk, b, min(b + chunk_len, total_windows)): i
                 for i, b in enumerate(bounds)
@@ -336,6 +334,7 @@ def augment_lattice_with_fingerprint(
     half_window: float = 4.0,
     min_matches: int = 6,
     max_score: float = 0.8,
+    only_weak: bool = False,
 ) -> int:
     """Append fingerprint-derived offset candidates to a starved lattice.
 
@@ -377,6 +376,9 @@ def augment_lattice_with_fingerprint(
     n_augmented = 0
     for i, w in enumerate(lattice):
         if np.isnan(smoothed[i]):
+            continue
+        if only_weak and any(c.score >= 0.55 and abs(c.offset_sec - smoothed[i]) <= 0.15
+                             for c in w.candidates):
             continue
         score = min(max_score, 0.4 + 0.02 * int(counts[i]))
         w.candidates.append(OffsetCandidate(

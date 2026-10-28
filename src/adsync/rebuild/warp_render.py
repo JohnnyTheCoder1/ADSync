@@ -21,7 +21,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.interpolate import PchipInterpolator
 
-from adsync.utils.mathx import catmull_rom_interp
+from adsync.utils.mathx import catmull_rom_interp, fade_edges
 
 log = logging.getLogger("adsync")
 
@@ -102,6 +102,7 @@ def _render_single_segment(
         _interp_into(y_ad, sr, inverse_fn, output[..., start:end], start, end)
 
     _apply_pitch_regions(y_ad, sr, inverse_fn, ad_len, output, valid_lo, valid_hi)
+    fade_edges(output, valid_lo, valid_hi, sr, head=valid_lo > 0, tail=valid_hi < output.shape[-1])
 
 
 def _render_multi_segment(
@@ -121,18 +122,19 @@ def _render_multi_segment(
     buf = np.empty(buf_shape, dtype=np.float32)
     placed: list[tuple[int, int]] = []
 
+    spans = []
     for warp_fn, seg_range in zip(warp_fns, segment_ranges):
         src_start, src_end = seg_range
         vid_start = max(0.0, min(video_duration, float(warp_fn(src_start))))
         vid_end = max(0.0, min(video_duration, float(warp_fn(src_end))))
         if vid_end <= vid_start:
             continue
-
         out_start = max(0, min(output_len, math.ceil(vid_start * sr)))
         out_end = max(0, min(output_len, math.floor(vid_end * sr) + 1))
-        if out_end <= out_start:
-            continue
+        if out_end > out_start:
+            spans.append((warp_fn, seg_range, out_start, out_end))
 
+    for k, (warp_fn, seg_range, out_start, out_end) in enumerate(spans):
         inverse_fn = _invert_pchip(warp_fn, seg_range, video_duration)
 
         xf_len = 0
@@ -167,6 +169,10 @@ def _render_multi_segment(
         _apply_pitch_regions(
             y_ad, sr, inverse_fn, ad_len, output, out_start + xf_len, out_end,
         )
+        # Edges next to silence fade; overlapping neighbours crossfade instead.
+        next_start = spans[k + 1][2] if k + 1 < len(spans) else output_len
+        fade_edges(output, out_start, out_end, sr,
+                   head=fade_in is None and out_start > 0, tail=next_start >= out_end and out_end < output_len)
 
 
 def _interp_into(

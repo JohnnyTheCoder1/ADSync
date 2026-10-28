@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 from pathlib import Path
 
 from adsync.models import MediaInfo, StreamInfo
-from adsync.utils.subprocesses import run_ffprobe
+from adsync.utils.subprocesses import _parse_ffmpeg_error, run_ffprobe
 
 log = logging.getLogger("adsync")
 
@@ -18,13 +19,11 @@ def probe(path: str | Path) -> MediaInfo:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
 
-    result = run_ffprobe([
-        "-v", "quiet",
-        "-print_format", "json",
-        "-show_format",
-        "-show_streams",
-        str(path),
-    ])
+    try:
+        result = run_ffprobe(["-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)])
+    except subprocess.CalledProcessError as exc:
+        reason = _parse_ffmpeg_error(exc.stderr or "").split(f"{path.name}: ", 1)[-1]
+        raise ValueError(f"Cannot read {path.name}: {reason}") from exc
 
     data = json.loads(result.stdout)
 
@@ -47,7 +46,10 @@ def probe(path: str | Path) -> MediaInfo:
             sample_rate=_int_or_none(s.get("sample_rate")),
             language=tags.get("language"),
             title=tags.get("title"),
-            duration=_float_or_none(s.get("duration") or fmt.get("duration")),
+            duration=(_float_or_none(s.get("duration")) or _tag_duration(tags)
+                      or _float_or_none(fmt.get("duration"))),
+            start_time=_float_or_none(s.get("start_time")),
+            visual_impaired=bool((s.get("disposition") or {}).get("visual_impaired")),
         )
 
         if codec_type == "video":
@@ -59,17 +61,28 @@ def probe(path: str | Path) -> MediaInfo:
         path=str(path),
         format_name=fmt.get("format_name"),
         duration=_float_or_none(fmt.get("duration")),
+        start_time=_float_or_none(fmt.get("start_time")),
         video_streams=video_streams,
         audio_streams=audio_streams,
     )
     log.info(
-        "Probed [bold]%s[/bold]: %.1f s, %d video, %d audio",
+        "Probed %s: %.1f s, %d video, %d audio",
         path.name,
         info.duration or 0,
         len(video_streams),
         len(audio_streams),
     )
     return info
+
+
+def _tag_duration(tags: dict) -> float | None:
+    """Per-track length from a Matroska DURATION tag ("HH:MM:SS.nnnnnnnnn")."""
+    value = next((v for k, v in tags.items() if k.upper() == "DURATION"), None)
+    try:
+        hours, minutes, seconds = str(value).split(":")
+        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    except ValueError:
+        return None
 
 
 def _int_or_none(v: object) -> int | None:

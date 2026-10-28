@@ -268,3 +268,41 @@ def fingerprint_residuals(
         return None
     all_res = np.concatenate(residuals)
     return float(np.percentile(all_res, 50)), float(np.percentile(all_res, 95))
+
+
+def local_fingerprint_residuals(warp_fns, segment_ranges, match_t_ad, match_t_vid) -> dict:
+    """Calibrate residuals locally, without hiding a coherent short bad span.
+
+    Each ten-second bucket keeps its dominant cluster. Scattered hash
+    coincidences remain in raw statistics; a coherent nonzero bucket still
+    determines the worst local p95 used for confidence and review.
+    """
+    from adsync.quality import dominant_offset_cluster
+
+    times = np.asarray(match_t_ad, dtype=np.float64)
+    targets = np.asarray(match_t_vid, dtype=np.float64)
+    residual = np.full(len(times), np.nan)
+    for fn, (lo, hi) in zip(warp_fns, segment_ranges):
+        mask = (times >= lo) & (times <= hi)
+        residual[mask] = fn(times[mask]) - targets[mask]
+    valid = np.isfinite(residual)
+    times, residual = times[valid], residual[valid]
+    result = {"status": "review", "p50_ms": None, "p95_ms": None,
+              "raw_p50_ms": None, "raw_p95_ms": None, "buckets": []}
+    if not len(times):
+        return result
+    result["raw_p50_ms"] = float(np.percentile(np.abs(residual), 50) * 1000)
+    result["raw_p95_ms"] = float(np.percentile(np.abs(residual), 95) * 1000)
+    strong = []
+    for bucket in np.unique(np.floor(times / 10).astype(np.int64)):
+        lo, hi = float(bucket * 10), float((bucket + 1) * 10)
+        mask = (times >= lo) & (times < hi)
+        cluster = dominant_offset_cluster(times[mask], residual[mask])
+        result["buckets"].append({"start_sec": lo, "end_sec": hi, **cluster})
+        if cluster["strong"]:
+            strong.append(cluster)
+    if strong:
+        result["p50_ms"] = float(np.median([abs(c["lag_sec"]) for c in strong]) * 1000)
+        result["p95_ms"] = max(c["p95_abs_sec"] for c in strong) * 1000
+        result["status"] = "pass" if result["p95_ms"] <= 150 else "review"
+    return result

@@ -30,7 +30,7 @@ It gets harder when the cuts don't match: different ad breaks, an inserted recap
 - Fit a shape-preserving monotone PCHIP warp through the decoded points, so the time-map never runs backwards.
 - Render the final audio from that continuous time-map, sample by sample. No chunk seams to glue.
 
-Either the alignment holds end-to-end, or the confidence score flags it up front so you know to review.
+The report exposes uncertain regions, and season processing checks the rendered audio before publication.
 
 ## What you get
 
@@ -86,9 +86,128 @@ pytest
 adsync sync episode.mkv ad_track.m4a -o episode.with-ad.mkv
 ```
 
-That's it. Open the resulting MKV in VLC, MPV, Plex, or Jellyfin, pick the "Audio Description" track, press play.
+Open the resulting MKV in VLC, MPV, Plex, or Jellyfin and select the "Audio Description" track.
+
+### CUDA acceleration
+
+For an NVIDIA GPU, install the optional CUDA backend:
+
+```bash
+pip install -e ".[cuda]"
+adsync devices
+adsync sync episode.mkv ad_track.m4a --device cuda
+```
+
+The CUDA extra installs CuPy and its runtime libraries using CuPy's
+[documented installation method](https://docs.cupy.dev/en/stable/install.html).
+A compatible NVIDIA driver is required. The standard installation still works on the CPU.
+
+`--device auto` is the default: larger correlations use CUDA when available,
+while small jobs stay on the CPU. If CUDA fails to initialize or runs out of
+memory, auto mode logs the reason and continues on the CPU. Use `--device cuda`
+to require GPU processing or `--device cpu` to disable it. The option works with
+`sync`, `analyze`, and `debug`; `ADSYNC_DEVICE` sets the default.
+
+CUDA speeds up the FFT cross-correlations used to find offsets, measure drift,
+and build the warp candidate lattice. Feature extraction, fingerprinting,
+audio rendering, and encoding still run on the CPU, so the overall speedup
+varies by source. Reports include the selected backend and counts of GPU and
+CPU correlations.
+
+### Shared-folder output
+
+Outputs can go to a local folder, a mapped drive, or a network share. That is
+useful when processing on one computer and keeping a Jellyfin library on
+another, such as a laptop or home server.
+
+```powershell
+adsync sync episode.mkv ad_track.m4a --output-dir '\\SERVER\Media\TV'
+
+# Set a default destination for this terminal session:
+$env:ADSYNC_OUTPUT_DIR = '\\SERVER\Media\TV'
+adsync sync episode.mkv ad_track.m4a
+```
+
+An explicit `-o` filename takes precedence over `--output-dir`, then
+`ADSYNC_OUTPUT_DIR`. Without a destination setting, output stays beside the
+source. The folder option also works with `mux` and `prep`.
+
+ADSync finishes encoding before publishing the output. Copies to another
+volume use a temporary non-media filename, then rename it when the transfer
+finishes, keeping incomplete files out of media-library scans. Existing output
+is replaced only after publication succeeds. If the destination becomes
+unavailable, ADSync retains the completed file and reports its recovery path.
+A failed `sync` publication also attempts to save its report beside that file.
+
+The account running ADSync needs write access to the destination. Share
+creation, authentication, and media-server library setup are managed separately.
 
 ## Commands
+
+### Process a season, or several seasons
+
+Point the season command at the video and AD folders for one show. It scans
+subfolders, pairs episodes, and writes results into `Season 01`, `Season 02`,
+and so on beneath the output folder.
+
+```bash
+# Check the pairings first, without processing media.
+adsync season "Show videos" "AD tracks" --dry-run
+
+# Prepare and sync every matched episode.
+adsync season "Show videos" "AD tracks" --output-dir "Finished" --language eng
+
+# Select seasons or individual episode numbers.
+adsync season "Show videos" "AD tracks" --season 2 --season 3 --output-dir "Finished"
+adsync season "Show videos" "AD tracks" --season 2 --episode 4 --episode 5
+```
+
+Matching uses identifiers such as `S02E04`, `[S02.E04]`, and `2x04`, with season
+folders supplying context for simpler names. When both folders have a clear
+matching number sequence, names such as `episode 1` and `ad 1` can also work.
+One folder's known season can supply the other's missing season when at least
+two unique episode numbers agree and there is no competing season.
+The preview explains inferred season numbers. If no season is identified,
+numeric inference uses Season 01; use `--season N` to supply the actual season.
+Files are matched by identifiers, never by their position in a sorted list.
+Duplicates, conflicting identifiers, and missing counterparts are listed for
+review. Use `--strict` to stop before processing when any selected input is
+unresolved.
+
+By default, each output keeps the requested original language, downmixes
+multichannel audio to stereo where needed, and adds the synced AD track.
+Preparation happens in the final mux, saving a full intermediate video copy.
+Video, subtitles, and attachments are copied. Already mono/stereo original
+audio is copied too. Use `--no-prep` to retain all original audio streams.
+
+The command detects usable CPU cores, available RAM, and working CUDA/VRAM,
+then chooses concurrent episode jobs and per-job thread budgets. It estimates
+memory from the selected media's duration, channels, and sample rate, and
+reserves capacity for the system. These are planning estimates, not a guarantee
+against memory pressure from other programs. Automatic concurrency is capped
+at four jobs to limit competing media I/O. `--jobs N`, `--threads N`, and
+`--device auto|cpu|cuda` provide control when tuning for a particular machine.
+`adsync devices` shows the detected resources.
+
+Rerunning the same command resumes unchanged completed episodes. Resume checks
+source content, processing settings, algorithm/QC revisions, and media/report/QC hashes;
+an existing MKV alone does not count as a completed job. Outputs without a
+matching completion record require `--overwrite`. Each episode gets its own
+log and report, and `season-summary.json` records the overall result. These
+live in a persistent local cache, whose path is printed at startup; use
+`--state-dir` to choose another location. A failed episode does not stop the
+remaining jobs, and low-confidence results are marked for review.
+
+The season command uses the same shared-folder publication and recovery path
+as `sync`. Exit codes are `0` for successful or resumed results, `1` when review
+is needed, `2` for failures or conflicts, and `130` for interruption.
+
+To compare worker counts on representative material, run
+`tools/benchmark_season.py --video-dir VIDEOS --ad-dir AD --workdir BENCHMARKS`.
+It measures complete processing with one, two, and four workers, including
+startup, rendering, and publication, and writes separate outputs for each run.
+
+### Single-file commands
 
 ```bash
 # Prep a source first (optional), keep one language's audio as stereo, drop the rest.
@@ -114,6 +233,8 @@ adsync mux episode.mkv already_synced_ad.m4a -o final.mkv
 
 | Flag | Default | Notes |
 |---|---|---|
+| `--device` | `auto` | `auto`, `cpu`, or `cuda`; also configurable through `ADSYNC_DEVICE` |
+| `--output-dir` | beside source | Local or shared destination folder; `ADSYNC_OUTPUT_DIR` sets the default |
 | `--mode` | `auto` | `auto`, `offset`, `drift`, `warp`, or `piecewise` |
 | `--codec` | `libopus` | Encoder for the AD track (Opus is tiny and clean for speech) |
 | `--bitrate` | `96k` | AD track bitrate |
@@ -141,13 +262,15 @@ Since then it's been through a stack of feature films, and the two that fought h
 
 If you have the tracks, it works.
 
-## Known artifacts
+## Verification and difficult material
 
-- None currently tracked. (The transient pitch drift during warped stretching was fixed by re-rendering stretch regions through a pitch-preserving WSOLA path, see `src/adsync/rebuild/warp_render.py`.)
+Season processing verifies the local render before publishing it. It checks content identity across the episode, targets edits and uncertain regions, preserves timing evidence and fitted coefficients in the report, and compares original/output video packet hashes. Inconclusive episodes remain available for review in local staging. A high overall alignment score alone is insufficient for publication.
+
+Short endings require independent matching evidence. Sparse soundtrack matches, narration-heavy passages and different source edits can still need review. Reports retain the unresolved regions instead of silently treating them as synchronized. See [season processing](docs/season-processing.md) for verification receipts, content-bound caches and configurable local staging.
 
 ## Measured accuracy
 
-`tools/accuracy_harness.py` applies edits with exactly known time maps (cuts up to 45 s, insertions, offsets, 200 ppm clock drift, a PAL-speed transfer) to real movie audio and scores every reported anchor against ground truth. Current numbers across all nine scenarios: **median placement error ≤ 10 ms (typically ~2.5 ms), p95 ≤ 16 ms, at least 99% of anchors within 50 ms**, the rare stragglers sit right on edit boundaries, where the true cut point is only defined to within an analysis window anyway. The harness doubles as the regression gate for alignment changes.
+`tools/accuracy_harness.py` applies edits with exactly known time maps (cuts up to 45 s, insertions, offsets, 200 ppm clock drift, a PAL-speed transfer) to real movie audio and scores every reported anchor against ground truth. Across the nine scenarios, CPU and CUDA produce matching scores: **median placement error ≤ 11 ms (typically ~2.5 ms), p95 ≤ 16 ms, at least 99% of anchors within 50 ms**. Individual anchors can still be substantially wrong around cuts or stretches without matching evidence, even when the overall score is high. Check the report's unmatched-content and bridged-region warnings. The harness is the regression check for alignment changes; pass `--device cpu` or `--device cuda` to compare backends.
 
 ## Roadmap
 
@@ -155,7 +278,9 @@ If you have the tracks, it works.
 - [x] Audio landmark fingerprinting: global offset-span detection, edit localization, and bad-spot (unmatched content) warnings
 - [x] Automatic detection and correction of PAL-style speed transfers
 - [x] Repeated-content defenses: monotone-playback filtering, excursion vetting, and post-fit verification against fingerprint matches
-- [ ] Optional GPU-accelerated cross-correlation for faster runs on long files
+- [x] Optional CUDA cross-correlation with CPU fallback and backend reporting
+- [x] Shared-folder output with staged publication and recovery after transfer failures
+- [x] Season processing with checked episode matching, automatic resource limits, and resume
 - [ ] Precomputed AD offset database / cache
 - [ ] Web UI for non-technical users
 - [ ] Automatic detection of matching AD tracks from a library

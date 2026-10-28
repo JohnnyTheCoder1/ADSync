@@ -18,6 +18,7 @@ Speed notes, measured on a 2 h film (HE-AAC 5.1 source, NVMe):
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import threading
 import time
@@ -26,7 +27,8 @@ from pathlib import Path
 from typing import Callable
 
 from adsync.models import MediaInfo, StreamInfo
-from adsync.utils.subprocesses import FFmpegError, _find_binary
+from adsync.media.output import staged_output, validate_output_path
+from adsync.utils.subprocesses import FFmpegError, ffmpeg_prefix, kill_tree, no_window
 
 log = logging.getLogger("adsync")
 
@@ -163,6 +165,7 @@ def pick_audio_stream(
     if language:
         want = language.lower()[:2]
         matches = [s for s in streams if (s.language or "").lower()[:2] == want]
+        matches = [s for s in matches if not is_description(s)] or matches
         if matches:
             return max(matches, key=lambda s: s.channels or 0)
         if len(streams) == 1:
@@ -183,7 +186,46 @@ def pick_audio_stream(
             "Re-run with --audio-index <n> to choose one explicitly."
         )
 
-    return max(streams, key=lambda s: s.channels or 0)
+    return max([s for s in streams if not is_description(s)] or streams, key=lambda s: s.channels or 0)
+
+
+# English plus the Nordic and German names: Synstolkning, Syntolkning, Synstolking, Audiodeskription, Hörfilm, Kuvailutulkkaus.
+_DESCRIPTION_TITLE = re.compile(
+    r"audio[ -]?des[ck]ri|descri(bed|ptive)|visually[ -]impaired|syns?tolk|h(ö|oe)rfilm|kuvailutulk", re.IGNORECASE)
+_AD_TAG = re.compile(r"\bAD\b")
+
+
+def is_description(stream: StreamInfo) -> bool:
+    """True for a stream flagged or titled as audio description."""
+    title = stream.title or ""
+    return stream.visual_impaired or bool(_DESCRIPTION_TITLE.search(title) or _AD_TAG.search(title))
+
+
+def pick_ad_stream(info: MediaInfo, *, language: str | None = "eng", index: int | None = None) -> StreamInfo:
+    """Choose the description stream of an AD source.
+
+    An explicit *index* wins and a lone stream is used as is. Otherwise the
+    stream flagged for the visually impaired or titled as a description is
+    used, preferring *language*; anything less certain raises.
+    """
+    streams = info.audio_streams
+    if not streams:
+        raise ValueError(f"No audio streams in {info.path}")
+    if index is not None:
+        return pick_audio_stream(info, audio_index=index)
+    if len(streams) == 1:
+        return streams[0]
+    described = [s for s in streams if is_description(s)]
+    if language and len(described) > 1:
+        want = language.lower()[:2]
+        described = [s for s in described if (s.language or "").lower()[:2] == want] or described
+    if len(described) == 1:
+        return described[0]
+    raise ValueError(
+        f"Cannot tell which audio stream of {Path(info.path).name} is the description.\n"
+        f"{_format_streams(streams)}\n"
+        "Re-run with --ad-stream <n> to choose one explicitly."
+    )
 
 
 def _format_streams(streams: list[StreamInfo]) -> str:
@@ -193,6 +235,7 @@ def _format_streams(streams: list[StreamInfo]) -> str:
             f"  index {s.index}: {s.codec_name or '?'}  lang={s.language or 'untagged'}  "
             f"{s.channels or '?'}ch ({s.channel_layout or 'unknown layout'})"
             + (f"  title={s.title!r}" if s.title else "")
+            + ("  visually impaired" if s.visual_impaired else "")
         )
     return "\n".join(lines)
 
@@ -219,6 +262,7 @@ def prep_video(
     if output_path is None:
         output_path = video_path.parent / (video_path.stem + ".prepped.mkv")
     output_path = Path(output_path)
+    validate_output_path(output_path, inputs=[video_path])
 
     info = probe(video_path)
     total_sec = info.duration or 0.0
@@ -256,33 +300,37 @@ def prep_video(
         "stereo downmix" if needs_downmix else "stream copy",
     )
 
-    args = [
-        "-i", str(video_path),
-        # 0:V (capital) excludes attached pictures, so embedded cover art can
-        # never be picked as "the movie"
-        "-map", "0:V:0",
-        "-map", f"0:{picked.index}",
-        "-map", "0:s?",
-        "-map", "0:t?",
-        "-c:v", "copy",
-        "-c:s", "copy",
-        *audio_args,
-        "-metadata:s:a:0", f"language={lang_tag}",
-        "-disposition:a:0", "default",
-        str(output_path),
-    ]
-
     t0 = time.monotonic()
-    _run_ffmpeg_with_progress(args, total_sec, on_progress)
-    elapsed = time.monotonic() - t0
+    with staged_output(output_path, inputs=[video_path]) as local_path:
+        from adsync.media.container import mkv_stream_plan
 
-    # Sanity: the output should exist and cover the source duration.
-    out_info = probe(output_path)
-    if total_sec and out_info.duration and abs(out_info.duration - total_sec) > 5.0:
-        log.warning(
-            "Prepped duration %.1f s differs from source %.1f s — check the output",
-            out_info.duration, total_sec,
-        )
+        plan = mkv_stream_plan(video_path, local_path.parent)
+        args = [
+            *plan.inputs,
+            "-i", str(video_path),
+            # 0:V (capital) excludes attached pictures, so embedded cover art can
+            # never be picked as "the movie"; the plan re-attaches it
+            "-map", "0:V:0",
+            "-map", f"0:{picked.index}",
+            "-map", "0:s?",
+            "-c:v", "copy",
+            "-c:s", "copy",
+            *audio_args,
+            "-metadata:s:a:0", f"language={lang_tag}",
+            "-disposition:a:0", "default",
+            *plan.outputs,
+            str(local_path),
+        ]
+        _run_ffmpeg_with_progress(args, total_sec, on_progress)
+
+        # Probe before publication, while failures can still preserve the old file.
+        out_info = probe(local_path)
+        if total_sec and out_info.duration and abs(out_info.duration - total_sec) > 5.0:
+            log.warning(
+                "Prepped duration %.1f s differs from source %.1f s — check the output",
+                out_info.duration, total_sec,
+            )
+    elapsed = time.monotonic() - t0
 
     log.info(
         "Prepped → %s  (%.0f s, %.0fx realtime, audio=%s)",
@@ -304,20 +352,18 @@ def _run_ffmpeg_with_progress(
     on_progress: Callable[[float, float, float], None] | None,
 ) -> None:
     """Run ffmpeg emitting machine-readable progress on stdout and parse it."""
-    binary = _find_binary("ffmpeg")
-    cmd = [
-        binary, "-hide_banner", "-y", "-nostats", "-loglevel", "error",
-        "-progress", "pipe:1", *args,
-    ]
+    cmd = [*ffmpeg_prefix(), "-y", "-nostats", "-loglevel", "error", "-progress", "pipe:1", *args]
     log.debug("ffmpeg %s", " ".join(args))
 
     proc = subprocess.Popen(
         cmd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
+        **no_window(),
     )
     assert proc.stdout is not None
 
@@ -332,20 +378,29 @@ def _run_ffmpeg_with_progress(
 
     done_sec = 0.0
     speed = 0.0
-    for line in proc.stdout:
-        key, _, value = line.strip().partition("=")
-        if key == "out_time_us" and value.lstrip("-").isdigit():
-            done_sec = max(done_sec, int(value) / 1e6)
-        elif key == "speed":
-            try:
-                speed = float(value.rstrip("x"))
-            except ValueError:
-                pass
-        elif key == "progress":
-            if on_progress is not None:
-                on_progress(done_sec, total_sec, speed)
-
-    proc.wait()
-    drain.join()
+    try:
+        for line in proc.stdout:
+            key, _, value = line.strip().partition("=")
+            if key == "out_time_us" and value.lstrip("-").isdigit():
+                done_sec = max(done_sec, int(value) / 1e6)
+            elif key == "speed":
+                try:
+                    speed = float(value.rstrip("x"))
+                except ValueError:
+                    pass
+            elif key == "progress":
+                if on_progress is not None:
+                    on_progress(done_sec, total_sec, speed)
+        proc.wait()
+    finally:
+        # Callback errors and Ctrl+C must release the output before the staging
+        # context cleans up. Closing stdout alone can leave the encoder alive.
+        if proc.poll() is None:
+            kill_tree(proc)
+        proc.wait()
+        drain.join(timeout=10)
+        proc.stdout.close()
+        if proc.stderr is not None:
+            proc.stderr.close()
     if proc.returncode != 0:
         raise FFmpegError(proc.returncode, "".join(stderr_buf))

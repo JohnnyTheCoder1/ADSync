@@ -9,11 +9,15 @@ and monotone on monotone data, avoiding overshoot problems of cubic splines.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 import numpy as np
 from scipy.interpolate import PchipInterpolator
 
 from adsync.models import WarpPath, WarpPoint
+
+if TYPE_CHECKING:
+    from adsync.align.fingerprint import TerminalSupport
 
 log = logging.getLogger("adsync")
 
@@ -34,6 +38,7 @@ def fit_warp_function(
     anchor_fraction: float = 0.6,
     min_anchor_density: float = 1 / 30,  # per second
     discontinuity_threshold: float = 2.0,
+    terminal_support: list[TerminalSupport] | None = None,
 ) -> tuple[list[PchipInterpolator], list[tuple[float, float]], WarpPath]:
     """Fit monotone PCHIP warp function(s) through the decoded path.
 
@@ -59,6 +64,35 @@ def fit_warp_function(
     warp_path : WarpPath
         Report-friendly summary of the path and anchor selection.
     """
+    # Independently measured terminal pieces are short by definition. Fit the
+    # supported body first, then place the closing piece explicitly; it must
+    # not have to win a duration vote against a whole episode's old offset.
+    if terminal_support:
+        support = terminal_support[-1]
+        body = [p for p in path if p.source_time < support.boundary]
+        body = [p for p in body if p.source_time < support.body_time]
+        body.append(WarpPoint(source_time=support.body_time,
+                              target_time=support.body_time + support.body_offset,
+                              confidence=0.8))
+        fns, ranges, wp = fit_warp_function(
+            body, support.boundary, video_duration,
+            anchor_fraction=anchor_fraction, min_anchor_density=min_anchor_density,
+            discontinuity_threshold=discontinuity_threshold,
+        )
+        fns.append(PchipInterpolator(
+            [support.boundary, ad_duration],
+            [support.boundary + support.offset, ad_duration + support.offset],
+        ))
+        ranges.append((support.boundary, ad_duration))
+        tail_points = [WarpPoint(source_time=t, target_time=t + support.offset,
+                                 confidence=0.8, is_anchor=True)
+                       for t in (support.first_time, support.last_time)]
+        wp.points.extend(tail_points)
+        wp.anchor_points.extend(tail_points)
+        wp.n_segments = len(fns)
+        wp.mean_confidence = float(np.mean([p.confidence for p in wp.points]))
+        return fns, ranges, wp
+
     if not path:
         # Fallback: identity warp
         fn = PchipInterpolator([0.0, ad_duration], [0.0, ad_duration])
@@ -194,7 +228,18 @@ def _split_at_discontinuities(
     for i in range(1, len(path)):
         prev_offset = path[i - 1].target_time - path[i - 1].source_time
         cur_offset = path[i].target_time - path[i].source_time
-        if abs(cur_offset - prev_offset) > threshold:
+        jump = abs(cur_offset - prev_offset)
+        # A small but sustained edit must not be smoothed into a speed change.
+        # Require stable, real evidence on both sides so jitter and ramps do
+        # not create artificial discontinuities.
+        small_cut = False
+        if 0.25 < jump <= threshold and i >= 3 and i + 3 <= len(path):
+            left, right = path[i - 3:i], path[i:i + 3]
+            if all(p.confidence > _SYNTH_CONF for p in left + right):
+                lo = np.array([p.target_time - p.source_time for p in left])
+                ro = np.array([p.target_time - p.source_time for p in right])
+                small_cut = bool(np.ptp(lo) <= 0.10 and np.ptp(ro) <= 0.10)
+        if jump > threshold or small_cut:
             if log_jumps:
                 log.info(
                     "Discontinuity at t=%.1fs: offset jumps %.2f → %.2f s",
@@ -382,6 +427,27 @@ def _select_anchors(
             break
         selected_idx.add(idx)
 
+    # Restore evidence lost by confidence ranking whenever the reduced fit
+    # misses a real decoded point by >30 ms. The fraction remains a starting
+    # budget, not permission to bend a measured plateau toward a later edit.
+    while len(selected_idx) < n:
+        selected = sorted(selected_idx)
+        sx = [points[i].source_time for i in selected]
+        sy = [points[i].target_time for i in selected]
+        if np.any(np.diff(sx) <= 0) or np.any(np.diff(sy) <= 0):
+            break  # monotone arbitration below handles conflicting evidence
+        fn = PchipInterpolator(sx, sy)
+        omitted = [i for i in range(n) if i not in selected_idx
+                   and points[i].confidence > _SYNTH_CONF]
+        if not omitted:
+            break
+        error = [abs(float(fn(points[i].source_time)) - points[i].target_time)
+                 for i in omitted]
+        additions = [i for i, e in zip(omitted, error) if e > 0.03]
+        if not additions:
+            break
+        selected_idx.update(additions)
+
     # Sort by source_time
     selected = sorted(selected_idx)
     return [points[i].model_copy(update={"is_anchor": True}) for i in selected]
@@ -454,7 +520,6 @@ def _add_boundaries(
             second.source_time - first.source_time, 1e-6,
         )
         t0_target = first.target_time - first.source_time * slope
-        t0_target = max(0.0, t0_target)
         result.insert(0, WarpPoint(
             source_time=0.0,
             target_time=t0_target,
@@ -470,7 +535,6 @@ def _add_boundaries(
             last.source_time - prev.source_time, 1e-6,
         )
         tend_target = last.target_time + (ad_duration - last.source_time) * slope
-        tend_target = min(video_duration, tend_target)
         result.append(WarpPoint(
             source_time=ad_duration,
             target_time=tend_target,

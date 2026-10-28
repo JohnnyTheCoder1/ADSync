@@ -30,6 +30,21 @@ def crossfade(a: NDArray[np.floating], b: NDArray[np.floating], n_samples: int) 
     return result
 
 
+EDGE_FADE_MS = 10.0  # long enough to remove a click, short enough to leave words intact
+
+
+def fade_edges(y: NDArray[np.float32], start: int, end: int, sr: int, *, head: bool, tail: bool) -> None:
+    """Raised-cosine fade-in/out of the edges of ``y[..., start:end]``, in place."""
+    n = min(int(EDGE_FADE_MS * sr / 1000), (end - start) // (2 if head and tail else 1))
+    if n <= 0:
+        return
+    ramp = (0.5 - 0.5 * np.cos(np.linspace(0.0, np.pi, n))).astype(np.float32)
+    if head:
+        y[..., start:start + n] *= ramp
+    if tail:
+        y[..., end - n:end] *= ramp[::-1]
+
+
 def catmull_rom_interp(
     src: NDArray[np.floating],
     pos: NDArray[np.float64],
