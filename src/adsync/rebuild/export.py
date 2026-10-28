@@ -13,13 +13,18 @@ from adsync.utils.subprocesses import run_ffmpeg
 
 log = logging.getLogger("adsync")
 
+# Sample bytes a RIFF header can describe, minus room for the header chunks.
+_RIFF_DATA_LIMIT = 0xFFFFFFFF - 65536
+_SAMPLE_BYTES = {"PCM_16": 2, "PCM_24": 3, "PCM_32": 4, "FLOAT": 4, "DOUBLE": 8}
 
-def export_wav(y: NDArray[np.floating], sr: int, path: Path) -> Path:
-    """Write the synced AD waveform to a WAV file."""
+
+def export_wav(y: NDArray[np.floating], sr: int, path: Path, *, subtype: str = "PCM_16") -> Path:
+    """Write a waveform to WAV, switching to RF64 when it would not fit a RIFF header."""
     path.parent.mkdir(parents=True, exist_ok=True)
     # soundfile expects (frames, channels); we store (channels, frames).
     data = y.T if y.ndim == 2 else y
-    sf.write(str(path), data, sr, subtype="PCM_16")
+    container = "RF64" if data.size * _SAMPLE_BYTES[subtype] > _RIFF_DATA_LIMIT else "WAV"
+    sf.write(str(path), data, sr, subtype=subtype, format=container)
     log.info("Exported WAV: %s (%.1f s)", path.name, y.shape[-1] / sr)
     return path
 
