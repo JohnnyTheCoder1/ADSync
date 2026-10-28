@@ -46,7 +46,8 @@ def probe(path: str | Path) -> MediaInfo:
             sample_rate=_int_or_none(s.get("sample_rate")),
             language=tags.get("language"),
             title=tags.get("title"),
-            duration=_float_or_none(s.get("duration") or fmt.get("duration")),
+            duration=(_float_or_none(s.get("duration")) or _tag_duration(tags)
+                      or _float_or_none(fmt.get("duration"))),
             start_time=_float_or_none(s.get("start_time")),
             visual_impaired=bool((s.get("disposition") or {}).get("visual_impaired")),
         )
@@ -72,6 +73,16 @@ def probe(path: str | Path) -> MediaInfo:
         len(audio_streams),
     )
     return info
+
+
+def _tag_duration(tags: dict) -> float | None:
+    """Per-track length from a Matroska DURATION tag ("HH:MM:SS.nnnnnnnnn")."""
+    value = next((v for k, v in tags.items() if k.upper() == "DURATION"), None)
+    try:
+        hours, minutes, seconds = str(value).split(":")
+        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    except ValueError:
+        return None
 
 
 def _int_or_none(v: object) -> int | None:

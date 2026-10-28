@@ -226,6 +226,14 @@ def run_pipeline(
         # stretch, and correct speed and pitch before any alignment runs.
         speed_stretch: float | None = None
         extra_warnings: list[str] = []
+        # Partial downloads decode cleanly but short; the header still states the full length.
+        ad_expected = ad_stream.duration or ad_info.duration
+        ad_truncated = bool(ad_expected) and ad_expected - ad_duration > max(5.0, 0.01 * ad_expected)
+        if ad_truncated:
+            extra_warnings.append(
+                f"AD file decoded to {_fmt_mmss(ad_duration)} but reports {_fmt_mmss(ad_expected)}: "
+                "it looks truncated or damaged, so the end of the description is missing"
+            )
         if config.speed_detect and fp is not None:
             from adsync.align.speed import detect_speed, stretch_fraction
 
@@ -573,6 +581,8 @@ def run_pipeline(
             fp_residual_p95_ms=fp_res_p95,
         )
         warnings = extra_warnings + warnings
+        if ad_truncated:
+            confidence = min(confidence, max(0.0, config.confidence_threshold - .01))
 
         # Keep confidence/landmark verification about the measured alignment.
         # Apply the user's final playback nudge consistently in every mode.

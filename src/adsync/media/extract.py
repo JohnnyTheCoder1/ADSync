@@ -13,7 +13,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from adsync.models import MediaInfo, StreamInfo
-from adsync.utils.subprocesses import FFmpegError, ffmpeg_command, kill_tree, no_window
+from adsync.utils.subprocesses import FFmpegError, decode_output, ffmpeg_command, kill_tree, no_window
 
 log = logging.getLogger("adsync")
 
@@ -74,6 +74,10 @@ def decode_audio(
         raise FFmpegError(proc.returncode, b"".join(errors))
     if not channels:
         raise ValueError(f"ffmpeg decoded no audio from {info.path}")
+    problems = decode_output(b"".join(errors)).strip().splitlines()
+    if problems:
+        log.warning("ffmpeg reported %d problem(s) decoding %s; first: %s",
+                    len(problems), Path(info.path).name, problems[0].strip())
 
     samples = raw[: raw.size - raw.size % (channels * dtype.itemsize)].view(dtype)
     if sample_fmt == "s16":
