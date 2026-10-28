@@ -84,6 +84,7 @@ def season(
     device: str = typer.Option("auto", "--device", envvar="ADSYNC_DEVICE", help="auto, cpu, or cuda"),
     mode: str = typer.Option("auto", "--mode", help="auto, offset, drift, piecewise, or warp"),
     language: str = typer.Option("eng", "--language", help="Original audio language to keep and AD language tag"),
+    ad_stream: Optional[int] = typer.Option(None, "--ad-stream", min=0, help="Audio stream index of the description when the AD files have several"),
     no_prep: bool = typer.Option(False, "--no-prep", help="Keep all original audio streams without stereo preparation"),
     codec: str = typer.Option("libopus", "--codec", help="Output AD audio codec"),
     bitrate: str = typer.Option("96k", "--bitrate", help="Output AD audio bitrate"),
@@ -109,7 +110,7 @@ def season(
             raise ValueError(f"--label-from must be one of: {', '.join(LABEL_SOURCES)}")
         config = SyncConfig(
             device=device, mode=mode, analysis_sr=analysis_sr,
-            ad_language=language, output_codec=codec, output_bitrate=bitrate,
+            ad_language=language, ad_stream=ad_stream, output_codec=codec, output_bitrate=bitrate,
             confidence_threshold=confidence_threshold, offset_adjust=offset_adjust,
             fingerprint=not no_fingerprint, speed_detect=not no_speed_detect,
             multiband=not no_multiband,

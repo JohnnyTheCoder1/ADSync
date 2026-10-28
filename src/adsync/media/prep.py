@@ -189,7 +189,9 @@ def pick_audio_stream(
     return max([s for s in streams if not is_description(s)] or streams, key=lambda s: s.channels or 0)
 
 
-_DESCRIPTION_TITLE = re.compile(r"audio[ -]?descri|descri(bed|ptive)|visually[ -]impaired", re.IGNORECASE)
+# English plus the Nordic and German names: Synstolkning, Syntolkning, Synstolking, Audiodeskription, Hörfilm, Kuvailutulkkaus.
+_DESCRIPTION_TITLE = re.compile(
+    r"audio[ -]?des[ck]ri|descri(bed|ptive)|visually[ -]impaired|syns?tolk|h(ö|oe)rfilm|kuvailutulk", re.IGNORECASE)
 _AD_TAG = re.compile(r"\bAD\b")
 
 

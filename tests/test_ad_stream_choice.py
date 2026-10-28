@@ -33,7 +33,9 @@ def test_flagged_description_stream_is_analyzed_and_rendered(pipeline_case, monk
     assert [kw.get("stream_index") for name, kw in case.extractions if name == "ad.wav"] == [1, 1]
 
 
-@pytest.mark.parametrize("title", ["Audio Description", "English [AD]", "Described Video", "Descriptive audio"])
+@pytest.mark.parametrize("title", ["Audio Description", "English [AD]", "Described Video", "Descriptive audio",
+                                   "Dansk Synstolkning", "Syntolkning", "Norsk synstolking", "Audiodeskription",
+                                   "Deutsch Hörfilm", "Kuvailutulkkaus", "Audiodescription"])
 def test_description_title_identifies_the_stream_without_a_flag(title):
     assert pick_ad_stream(_info(_stream(0, "Stereo"), _stream(1, title))).index == 1
 

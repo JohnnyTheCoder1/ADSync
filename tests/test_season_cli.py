@@ -158,3 +158,10 @@ def test_unreachable_output_share_stops_before_any_work(tmp_path):
     result = CliRunner().invoke(app, ["season", str(video), str(ad), "--output-dir", share, "--no-content-check"])
     assert result.exit_code == 2, result.output
     assert "not reachable" in result.output
+
+
+def test_season_accepts_an_explicit_ad_stream(tmp_path):
+    video, ad = _folders(tmp_path)
+    result = CliRunner().invoke(app, ["season", str(video), str(ad), "--ad-stream", "1",
+                                     "--dry-run", "--no-content-check"])
+    assert result.exit_code == 0, result.output
