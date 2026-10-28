@@ -298,25 +298,27 @@ def prep_video(
         "stereo downmix" if needs_downmix else "stream copy",
     )
 
-    args = [
-        "-i", str(video_path),
-        # 0:V (capital) excludes attached pictures, so embedded cover art can
-        # never be picked as "the movie"
-        "-map", "0:V:0",
-        "-map", f"0:{picked.index}",
-        "-map", "0:s?",
-        "-map", "0:t?",
-        "-c:v", "copy",
-        "-c:s", "copy",
-        *audio_args,
-        "-metadata:s:a:0", f"language={lang_tag}",
-        "-disposition:a:0", "default",
-        str(output_path),
-    ]
-
     t0 = time.monotonic()
     with staged_output(output_path, inputs=[video_path]) as local_path:
-        args[-1] = str(local_path)
+        from adsync.media.container import mkv_stream_plan
+
+        plan = mkv_stream_plan(video_path, local_path.parent)
+        args = [
+            *plan.inputs,
+            "-i", str(video_path),
+            # 0:V (capital) excludes attached pictures, so embedded cover art can
+            # never be picked as "the movie"; the plan re-attaches it
+            "-map", "0:V:0",
+            "-map", f"0:{picked.index}",
+            "-map", "0:s?",
+            "-c:v", "copy",
+            "-c:s", "copy",
+            *audio_args,
+            "-metadata:s:a:0", f"language={lang_tag}",
+            "-disposition:a:0", "default",
+            *plan.outputs,
+            str(local_path),
+        ]
         _run_ffmpeg_with_progress(args, total_sec, on_progress)
 
         # Probe before publication, while failures can still preserve the old file.

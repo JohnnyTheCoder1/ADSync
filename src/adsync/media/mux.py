@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import json
 import subprocess
 import threading
 from pathlib import Path
@@ -11,6 +10,7 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
+from adsync.media.container import mkv_stream_plan
 from adsync.media.output import staged_output
 from adsync.models import StreamInfo
 from adsync.utils.progress import Progress
@@ -83,11 +83,9 @@ def _mux_ad_track(
     else:
         n_channels, total_samples = synced_y.shape
 
-    attachment_inputs, attachment_outputs = _attachment_options(video_path, output_path.parent)
+    plan = mkv_stream_plan(video_path, output_path.parent)
     main_audio_args: list[str] = []
-    mapping = ["-map", "0"]
-    if attachment_inputs:
-        mapping += ["-map", "-0:t"]
+    mapping = ["-map", "0", *plan.mapping]
     if original_audio is not None:
         if original_audio.codec_type != "audio" or original_audio.index < 0:
             raise ValueError("Selected original audio must identify an audio stream")
@@ -100,7 +98,7 @@ def _mux_ad_track(
         n_audio = n_existing_audio if n_existing_audio is not None else _count_audio_streams(video_path)
 
     args = [
-        *attachment_inputs,
+        *plan.inputs,
         "-i", str(video_path),
         "-f", "f32le", "-ar", str(sr), "-ac", str(n_channels), "-i", "pipe:0",
         *mapping,
@@ -111,7 +109,7 @@ def _mux_ad_track(
         f"-b:a:{n_audio}", bitrate,
         f"-metadata:s:a:{n_audio}", f"language={language}",
         f"-metadata:s:a:{n_audio}", f"title={title}",
-        *attachment_outputs,
+        *plan.outputs,
         str(output_path),
     ]
 
@@ -194,36 +192,6 @@ def _prepared_main_audio_args(stream: StreamInfo, language: str) -> list[str]:
     return args
 
 
-def _attachment_options(video_path: Path, stage_dir: Path) -> tuple[list[str], list[str]]:
-    """Preserve attachment bytes without mapping attachment packets into mux.
-
-    Some FFmpeg versions submit invalid attachment packets when an MKV and raw
-    PCM input are combined. Dumping the extradata while opening the same input,
-    then attaching those local bytes, avoids another read/write of the video.
-    Paths are generated locally; embedded filenames are used only as metadata.
-    """
-    from adsync.utils.subprocesses import run_ffprobe
-
-    details = json.loads(run_ffprobe([
-        "-v", "error", "-select_streams", "t", "-show_entries",
-        "stream=index:stream_tags", "-of", "json", str(video_path),
-    ]).stdout)
-    inputs: list[str] = []
-    outputs: list[str] = []
-    for number, stream in enumerate(details.get("streams", [])):
-        local_path = stage_dir / f"attachment-{number:04d}.bin"
-        inputs += [f"-dump_attachment:{stream['index']}", str(local_path)]
-        outputs += ["-attach", str(local_path)]
-        tags = dict(stream.get("tags", {}))
-        if not any(key.casefold() == "filename" for key in tags):
-            tags["filename"] = f"attachment-{number:04d}.bin"
-        if not any(key.casefold() == "mimetype" for key in tags):
-            tags["mimetype"] = "application/octet-stream"
-        for key, value in tags.items():
-            outputs += [f"-metadata:s:t:{number}", f"{key}={value}"]
-    return inputs, outputs
-
-
 def mux_ad_file(
     video_path: str | Path,
     ad_path: str | Path,
@@ -269,21 +237,21 @@ def _mux_ad_file(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     n_audio = _count_audio_streams(video_path)
-    attachment_inputs, attachment_outputs = _attachment_options(video_path, output_path.parent)
+    plan = mkv_stream_plan(video_path, output_path.parent)
 
     args = [
-        *attachment_inputs,
+        *plan.inputs,
         "-i", str(video_path),
         "-i", str(ad_path),
         "-map", "0",
-        *(["-map", "-0:t"] if attachment_inputs else []),
+        *plan.mapping,
         "-map", "1:a:0",
         "-c", "copy",
         f"-c:a:{n_audio}", codec,
         f"-b:a:{n_audio}", bitrate,
         f"-metadata:s:a:{n_audio}", f"language={language}",
         f"-metadata:s:a:{n_audio}", f"title={title}",
-        *attachment_outputs,
+        *plan.outputs,
         str(output_path),
     ]
 
