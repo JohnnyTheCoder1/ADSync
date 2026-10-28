@@ -16,10 +16,10 @@ _TAG = re.compile(
     r"|(?P<xs>\d{1,2})x(?P<xe>\d{2,3}))(?=$|[^a-z0-9]|[ex]\d)", re.I,
 )
 _DOTTED_TAG = re.compile(r"^(\d{1,2})\.(\d{2})[ \t]+(?:-[ \t]+)?[^\W\d_]", re.I)
+# Further episodes need an E marker or attached dash ("E02", "-E02", "E01-02"); " - 316" and ".x264" are not.
 _CONTINUATION = re.compile(
-    r"^(?P<sep>[ ._-]*)(?:[ex](?P<label>\d{1,3})"
-    r"|(?P<range>[-+&])[ ._-]*(?:e|x)?(?P<bare>\d{1,3}))"
-    r"(?=$|[^a-z0-9]|[ex]\d)", re.I,
+    r"^(?:(?P<sep>[ ._]*[-+&]?[ ._]*)e(?P<label>\d{1,3})|(?P<range>-)(?P<bare>\d{1,3}))"
+    r"(?=$|[^a-z0-9]|e\d)", re.I,
 )
 _EPISODE = re.compile(
     r"(?<![a-z0-9])(?:episode|ep|ad|e)[ ._-]*(\d{1,3})(?=$|[^a-z0-9]|e\d)", re.I,
@@ -120,7 +120,7 @@ def _continuations(stem: str, end: int, initial: int) -> set[int]:
     previous = initial
     while match := _CONTINUATION.match(stem[end:]):
         number = int(match.group("label") or match.group("bare"))
-        if match.group("range") == "-" or "-" in match.group("sep"):
+        if match.group("range") or "-" in (match.group("sep") or ""):
             numbers.update(range(min(previous, number), max(previous, number) + 1))
         else:
             numbers.add(number)
@@ -339,6 +339,9 @@ def discover_season(
     by_video, by_audio = index(videos, "video"), index(audio, "AD track")
     for key in sorted(by_video.keys() | by_audio.keys()):
         if key in blocked:
+            others = tuple(sorted(by_video.get(key, []) + by_audio.get(key, []), key=_sort_path))
+            result.issues.append(DiscoveryIssue(
+                key, "Episode skipped: a multi-episode or conflicting file also claims it", others))
             continue
         video_matches, ad_matches = by_video.get(key, []), by_audio.get(key, [])
         paths = tuple(sorted(video_matches + ad_matches, key=_sort_path))
