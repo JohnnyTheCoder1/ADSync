@@ -60,6 +60,17 @@ def _probe_tasks(pairs, analysis_sr: int):
     return valid, tasks, issues
 
 
+def _print_outcomes(results, echo) -> None:
+    """One line per episode that needs attention, naming it and the reason."""
+    for item in results:
+        if item.status in ("needs_review", "skipped_needs_review"):
+            echo(f"{item.label}: needs review ({item.error or 'see its report'})")
+        elif item.error:
+            echo(f"{item.label}: {item.error}")
+        if item.retained_local_path:
+            echo(f"  Unpublished render for review: {item.retained_local_path}")
+
+
 def season(
     video_folder: Path = typer.Argument(..., exists=True, file_okay=False, help="Video folder for one show; scanned recursively"),
     ad_folder: Path = typer.Argument(..., exists=True, file_okay=False, help="AD audio folder for the same show; scanned recursively"),
@@ -194,11 +205,7 @@ def season(
         atomic_json(summary_path, json.loads(json.dumps(summary, default=str)))
         typer.echo("Season summary: " + ", ".join(f"{count} {status.replace('_', ' ')}"
                                                 for status, count in sorted(result.counts.items())))
-        for item in result.results:
-            if item.error:
-                typer.echo(f"{item.label}: {item.error}")
-            if item.retained_local_path:
-                typer.echo(f"  Completed local file: {item.retained_local_path}")
+        _print_outcomes(result.results, typer.echo)
         typer.echo(f"State: {result.state_path}")
         typer.echo(f"Summary: {summary_path}")
         if result.interrupted:

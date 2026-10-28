@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 
 ANALYSIS_REVISION = "analysis-20261028-container-timeline"
+DEFAULT_MAX_GB = 16.0  # one long season of analysis, so a run never evicts what it still needs
 log = logging.getLogger("adsync")
 
 
@@ -47,12 +48,19 @@ def default_cache() -> ArtifactCache | None:
         root = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "ADSync" / "analysis"
     else:
         root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "adsync" / "analysis"
-    return ArtifactCache(root)
+    try:
+        max_gb = float(os.environ.get("ADSYNC_CACHE_MAX_GB", DEFAULT_MAX_GB))
+    except ValueError:
+        raise ValueError("ADSYNC_CACHE_MAX_GB must be a number of gigabytes") from None
+    return ArtifactCache(root, max_bytes=int(max_gb * 1024 ** 3))
 
 
 class ArtifactCache:
-    def __init__(self, root: Path):
+    """Analysis artifacts on disk, trimmed to *max_bytes* by least recent use."""
+
+    def __init__(self, root: Path, *, max_bytes: int | None = None):
         self.root = Path(root)
+        self.max_bytes = max_bytes
 
     def _path(self, key: str) -> Path:
         if not re.fullmatch(r"[0-9a-f]{64}", key):
@@ -65,6 +73,7 @@ class ArtifactCache:
             with np.load(path, allow_pickle=False) as archive:
                 arrays = {name: archive[name] for name in archive.files}
             self._validate(arrays)
+            os.utime(path)  # recency for eviction; access times are often not updated
             return arrays
         except FileNotFoundError:
             return None
@@ -78,6 +87,26 @@ class ArtifactCache:
                 log.warning("Ignoring corrupt analysis cache %s", path)
                 return None
             raise
+
+    def _evict(self) -> None:
+        if self.max_bytes is None:
+            return
+        entries = []
+        for path in self.root.glob("*/*.npz"):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            entries.append((stat.st_mtime_ns, str(path), stat.st_size))
+        total = sum(size for _, _, size in entries)
+        for _, name, size in sorted(entries):
+            if total <= self.max_bytes:
+                break
+            try:
+                Path(name).unlink()
+                total -= size
+            except OSError:
+                log.debug("Could not evict analysis cache entry %s", name)
 
     @staticmethod
     def _validate(arrays: dict[str, np.ndarray]) -> None:
@@ -101,6 +130,7 @@ class ArtifactCache:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, path)
+            self._evict()
         except OSError as exc:
             # A full/unavailable cache must not prevent processing valid sources.
             log.warning("Could not save analysis cache %s: %s", path, exc)

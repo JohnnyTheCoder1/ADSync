@@ -407,7 +407,7 @@ def _run_worker(job: _Job, *, config: dict, threads: int, overwrite: bool, prepa
             retained = Path(result.retained_local_path).resolve() if result.retained_local_path else None
             preserve = retained is not None and retained.is_relative_to(resolved) and retained.is_file()
             if preserve:
-                log.warning("[%s] Completed local output retained at: %s", result.label, retained)
+                log.warning("[%s] Unpublished render retained at: %s", result.label, retained)
             elif resolved.parent == work_root.resolve() and resolved.name.startswith("episode-"):
                 shutil.rmtree(resolved, ignore_errors=True)
     return result
@@ -560,6 +560,7 @@ def run_season(
                         result.status = "skipped_completed"
                     else:
                         result.status = "skipped_needs_review"
+                        result.error = receipt.get("error")
                         result.phase = receipt.get("phase", "pending")
                         result.retained_local_path = receipt.get("retained_local_path")
                     emit("skip", result)

@@ -82,7 +82,8 @@ def season(tmp_path, monkeypatch):
                 if status == "completed":
                     payload["phase"] = "transfer_verified"
                 elif status == "needs_review":
-                    payload.update(phase="processed", retained_local_path=str(path))
+                    payload.update(phase="processed", retained_local_path=str(path),
+                                   error="Local quality checks require review; output has not been published.")
                     runner.atomic_json(Path(self.spec["progress_path"]), {
                         "phase": "processed", "fingerprint": self.spec["fingerprint"],
                         "work_path": self.spec["work_path"], "local_path": str(path),

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import logging
@@ -301,17 +301,28 @@ def check_season_content(
     echo(f"Content check: comparing the audio of {len(pairs)} episode pair(s), {workers} file(s) at a time.")
     features: dict[tuple[int, bool], FingerprintFeatures] = {}
     notes: list[str] = []
-    with _quiet_log(), ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(load_recording_features, path, config, video=video,
-                               threads=max(1, (os.cpu_count() or 2) // workers)): (index, video, path)
-                   for index, video, path in files}
-        for done, future in enumerate(as_completed(futures), 1):
-            index, video, path = futures[future]
-            try:
-                features[index, video] = future.result()
-            except Exception as exc:
-                notes.append(f"Content check could not read {path.name} ({exc}); its pair relies on filenames.")
-            echo(f"Content check: read {done} of {len(files)} files.")
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        with _quiet_log():
+            futures = {pool.submit(load_recording_features, path, config, video=video,
+                                   threads=max(1, (os.cpu_count() or 2) // workers)): (index, video, path)
+                       for index, video, path in files}
+            pending, done = set(futures), 0
+            while pending:
+                # A bounded wait keeps Ctrl+C responsive on Windows.
+                finished, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                for future in finished:
+                    index, video, path = futures[future]
+                    try:
+                        features[index, video] = future.result()
+                    except Exception as exc:
+                        notes.append(f"Content check could not read {path.name} ({exc}); its pair relies on filenames.")
+                    done += 1
+                    echo(f"Content check: read {done} of {len(files)} files.")
+    except BaseException:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown()
 
     readable = [i for i in range(len(pairs)) if (i, True) in features and (i, False) in features]
     resolved = resolve_content_pairs(
