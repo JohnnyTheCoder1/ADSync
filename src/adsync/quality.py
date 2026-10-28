@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 import math
-import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -24,6 +23,7 @@ from adsync.align.fingerprint import FingerprintResult, fingerprint_align
 from adsync.models import MediaInfo, StreamInfo
 from adsync.quality_policy import QC_DECISION_POLICY_REVISION, evaluate_quality_policy
 from adsync.quality_targets import QC_TARGETS_REVISION, raw_offset_windows
+from adsync.utils.subprocesses import NO_WINDOW, ffmpeg_prefix
 
 
 QC_POLICY_REVISION = "distributed-identity-local-signal-v6+" + QC_DECISION_POLICY_REVISION + "+" + QC_TARGETS_REVISION
@@ -661,14 +661,14 @@ def verify_media_sync(path: Path, *, work_dir: Path | None = None, report: Any =
         Path(work_dir).mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="adsync-qc-", dir=work_dir) as folder:
         targets = [Path(folder) / name for name in ("main.wav", "description.wav")]
-        command = ["ffmpeg", "-hide_banner", "-v", "error", "-xerror", "-y", "-threads", "2",
+        command = [*ffmpeg_prefix(), "-v", "error", "-xerror", "-y", "-threads", "2",
                    "-filter_threads", "2", "-err_detect", "explode", "-copyts", "-start_at_zero", "-i", str(path)]
         for stream, target in zip((main_stream, ad_stream), targets):
             command += ["-map", f"0:{stream.index}", "-vn", "-sn", "-dn",
                         "-af", "aresample=async=1:first_pts=0", "-ac", "1", "-ar", "16000",
                         "-c:a", "pcm_f32le", "-threads", "2", str(target)]
-        options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
-        process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3600, **options)
+        process = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, timeout=3600, **NO_WINDOW)
         if process.returncode or process.stderr.strip():
             raise RuntimeError(f"Rendered audio decode failed: {process.stderr.decode(errors='replace')[-6000:]}")
         main, rate = sf.read(targets[0], dtype="float32")
@@ -693,11 +693,10 @@ def verify_video_preservation(source: Path, output: Path) -> dict[str, Any]:
     import re
 
     def packet_hashes(path: Path) -> list[str]:
-        options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
         result = subprocess.run([
-            "ffmpeg", "-hide_banner", "-v", "error", "-xerror", "-threads", "2", "-i", str(path),
+            *ffmpeg_prefix(), "-v", "error", "-xerror", "-threads", "2", "-i", str(path),
             "-map", "0:v", "-c:v", "copy", "-f", "streamhash", "-hash", "sha256", "-",
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3600, **options)
+        ], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3600, **NO_WINDOW)
         if result.returncode or result.stderr.strip():
             raise RuntimeError(f"Video preservation hashing failed: {result.stderr.decode(errors='replace')[-6000:]}")
         hashes = re.findall(r"\d+,v,SHA256=([0-9a-fA-F]{64})", result.stdout.decode())

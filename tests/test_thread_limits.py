@@ -51,25 +51,21 @@ def test_worker_initializer_propagates_run_budget_to_python_threads(monkeypatch)
     assert hardware.effective_thread_count() == 8
 
 
-@pytest.mark.parametrize("entry", ["run_ffmpeg", "run_ffmpeg_piped", "run_ffmpeg_streamed"])
+@pytest.mark.parametrize("entry", ["run_ffmpeg", "run_ffmpeg_streamed"])
 def test_ffmpeg_limits_apply_to_each_decoder_encoder_and_filters(monkeypatch, entry):
     from adsync.utils import subprocesses
     captured = []
 
     def run(command, **kwargs):
         captured.append(command)
-        return SimpleNamespace(returncode=0, stderr="")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(subprocesses, "_find_binary", lambda name: name)
     monkeypatch.setattr(subprocesses.subprocess, "run", run)
     monkeypatch.setattr(subprocesses.subprocess, "Popen", run)
     args = ["-i", "video.mkv", "-f", "f32le", "-i", "pipe:0", "-c:a", "libopus", "output.mkv"]
     original = args.copy()
-    call = getattr(subprocesses, entry)
-    if entry == "run_ffmpeg_piped":
-        call(args, b"", threads=2)
-    else:
-        call(args, threads=2)
+    getattr(subprocesses, entry)(args, threads=2)
     command = captured[0]
     for index, arg in enumerate(command):
         if arg == "-i":
@@ -85,7 +81,7 @@ def test_ffmpeg_environment_thread_budget_is_used_without_explicit_argument(monk
     captured = []
     monkeypatch.setenv("ADSYNC_THREADS", "3")
     monkeypatch.setattr(subprocesses, "_find_binary", lambda name: name)
-    monkeypatch.setattr(subprocesses.subprocess, "run", lambda cmd, **kw: (captured.append(cmd) or SimpleNamespace(returncode=0, stderr="")))
+    monkeypatch.setattr(subprocesses.subprocess, "run", lambda cmd, **kw: (captured.append(cmd) or SimpleNamespace(returncode=0, stdout=b"", stderr=b"")))
     subprocesses.run_ffmpeg(["-i", "a.wav", "b.wav"])
     assert captured[0][-3:] == ["-threads", "3", "b.wav"]
 

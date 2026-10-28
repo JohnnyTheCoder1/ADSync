@@ -27,7 +27,7 @@ from typing import Callable
 
 from adsync.models import MediaInfo, StreamInfo
 from adsync.media.output import staged_output, validate_output_path
-from adsync.utils.subprocesses import FFmpegError, _find_binary
+from adsync.utils.subprocesses import NO_WINDOW, FFmpegError, ffmpeg_prefix
 
 log = logging.getLogger("adsync")
 
@@ -308,20 +308,18 @@ def _run_ffmpeg_with_progress(
     on_progress: Callable[[float, float, float], None] | None,
 ) -> None:
     """Run ffmpeg emitting machine-readable progress on stdout and parse it."""
-    binary = _find_binary("ffmpeg")
-    cmd = [
-        binary, "-hide_banner", "-y", "-nostats", "-loglevel", "error",
-        "-progress", "pipe:1", *args,
-    ]
+    cmd = [*ffmpeg_prefix(), "-y", "-nostats", "-loglevel", "error", "-progress", "pipe:1", *args]
     log.debug("ffmpeg %s", " ".join(args))
 
     proc = subprocess.Popen(
         cmd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
+        **NO_WINDOW,
     )
     assert proc.stdout is not None
 
