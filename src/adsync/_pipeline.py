@@ -116,6 +116,7 @@ def run_pipeline(
         # Cache analysis using source content, selected stream and semantic settings.
         # Explicit debug runs still materialize all requested diagnostic WAVs.
         from adsync.cache import content_key, default_cache, derived_key
+        from adsync.features.analysis_audio import analysis_cache_options
         cache = default_cache() if debug_dir is None else None
         source_keys = [None, None]
         source_options = [None, None]
@@ -125,11 +126,7 @@ def run_pipeline(
         if cache is not None:
             for index, (source, _, _, stream) in enumerate(source_specs):
                 if source.is_file():
-                    source_options[index] = {
-                        "kind": "preprocessed-audio", "stream": stream,
-                        "sr": config.analysis_sr, "mono": config.mono,
-                        "highpass_hz": config.highpass_hz, "trim_silence": False,
-                    }
+                    source_options[index] = analysis_cache_options(stream, config)
                     source_keys[index] = content_key(source, source_options[index])
                     artifact = cache.get(source_keys[index])
                     if artifact is not None and set(artifact) == {"audio"} and artifact["audio"].ndim == 1:

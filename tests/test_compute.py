@@ -45,6 +45,21 @@ def test_cpu_preserves_input_arrays_and_handles_silence_and_short_region():
     assert backend.normalized_correlation(np.ones(2), np.ones(3)).size == 0
 
 
+def test_near_silence_after_loud_audio_scores_as_silence_not_a_match():
+    # Real failure: digital near-silence after minutes of soundtrack scored up
+    # to 455 because cumulative-sum rounding exceeded the window energy.
+    backend = _compute().CorrelationBackend("cpu")
+    rng = np.random.default_rng(7)
+    loud = 480_000
+    region = np.r_[rng.normal(size=loud) * .06, rng.normal(size=16_000) * 1e-7]
+    template = rng.normal(size=8_000) * .09
+    result = backend.normalized_correlation(region, template)
+    assert np.all(np.abs(result) <= 1)
+    np.testing.assert_array_equal(result[loud:], 0)
+    head = slice(0, 2_000)
+    np.testing.assert_allclose(result[head], _reference(region[:9_999], template)[head], atol=1e-9)
+
+
 def test_invalid_backend_is_rejected():
     with pytest.raises(ValueError, match="auto.*cpu.*cuda"):
         _compute().CorrelationBackend("gpu")

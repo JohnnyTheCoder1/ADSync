@@ -85,11 +85,16 @@ def season(
     state_dir: Optional[Path] = typer.Option(None, "--state-dir", help="Local checkpoint/report/log folder; default: per-show user cache"),
     resume: bool = typer.Option(True, "--resume/--no-resume", help="Skip verified unchanged results from previous runs"),
     overwrite: bool = typer.Option(False, "--overwrite", help="Allow replacing existing outputs that do not match a saved completion"),
+    label_from: str = typer.Option("auto", "--label-from", help="When audio shows files are swapped, number outputs by: auto (recaps decide, else video), video, or ad"),
+    no_content_check: bool = typer.Option(False, "--no-content-check", help="Pair by filenames only, without comparing audio first"),
 ) -> None:
     """Match, prepare and sync one or more seasons with hardware-sized workers."""
+    from adsync.batch.content_pairing import LABEL_SOURCES
     from adsync.batch.discovery import DiscoveryIssue, EpisodeKey, discover_season
 
     try:
+        if label_from not in LABEL_SOURCES:
+            raise ValueError(f"--label-from must be one of: {', '.join(LABEL_SOURCES)}")
         config = SyncConfig(
             device=device, mode=mode, analysis_sr=analysis_sr,
             ad_language=language, output_codec=codec, output_bitrate=bitrate,
@@ -117,6 +122,16 @@ def season(
                     key = EpisodeKey(selected_season, episode)
                     if key not in known_keys:
                         issues.append(DiscoveryIssue(key, "Requested episode is missing from both input folders", ()))
+        content_records: list[dict] = []
+        if pairs and not no_content_check:
+            from adsync.batch.content_pairing import check_season_content
+
+            analysis_config = config.model_copy(update={"prepare_audio": not no_prep})
+            pairs, content_issues, content_notes, content_records = check_season_content(
+                pairs, analysis_config, label_from=label_from, echo=typer.echo)
+            issues.extend(content_issues)
+            for note in content_notes:
+                typer.echo(f"Content note: {note}")
         typer.echo(f"Matched {len(pairs)} episode(s). Preparation: {'disabled' if no_prep else language + ' / stereo as needed'}.")
         for note in getattr(discovery, "notes", []):
             typer.echo(f"Pairing note: {note}")
@@ -168,7 +183,7 @@ def season(
         validate_output_path(summary_path, protected)
         summary = {
             "hardware": asdict(hardware), "resources": asdict(resources),
-            "pairing_notes": getattr(discovery, "notes", []),
+            "pairing_notes": getattr(discovery, "notes", []), "content_check": content_records,
             "unresolved": [asdict(issue) for issue in issues], "probe_errors": probe_issues,
             "counts": result.counts, "batch": asdict(result),
         }

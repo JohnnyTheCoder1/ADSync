@@ -24,6 +24,8 @@ import time
 from typing import Callable, Iterable
 import uuid
 
+import psutil
+
 from adsync import __version__
 from adsync.config import SyncConfig
 from adsync.batch.transaction import (ALGORITHM_REVISION, commit_matches, content_signature,
@@ -112,12 +114,53 @@ def atomic_json(path: Path, value: dict) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def _owner_has_exited(owner: dict) -> bool:
+    """True only when a same-host owner process is provably gone or its PID was reused."""
+    try:
+        if owner.get("host") != socket.gethostname():
+            return False
+        pid = int(owner["pid"])
+        started = datetime.fromisoformat(owner["started"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return False
+    try:
+        # Lock timestamps have one-second resolution.
+        return psutil.Process(pid).create_time() > started + 1
+    except psutil.NoSuchProcess:
+        return True
+    except psutil.Error:
+        return False
+
+
+def _reclaim_if_abandoned(path: Path) -> bool:
+    try:
+        owner = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(owner, dict) or not _owner_has_exited(owner):
+        return False
+    # Renaming first means only one of several racing runs can claim it.
+    try:
+        abandoned = path.with_name(f"{path.name}.{uuid.uuid4().hex}.abandoned")
+        path.rename(abandoned)
+    except OSError:
+        return False
+    log.warning("Reclaimed lock left by stopped process %s: %s", owner.get("pid"), path)
+    abandoned.unlink(missing_ok=True)
+    return True
+
+
 @contextmanager
 def _exclusive_lock(path: Path, description: str):
     path.parent.mkdir(parents=True, exist_ok=True)
     token = uuid.uuid4().hex
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            if not _reclaim_if_abandoned(path):
+                raise
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError as exc:
         try:
             owner = path.read_text(encoding="utf-8")[:500]

@@ -6,7 +6,11 @@ The season command processes one show's video and AD folders, including multiple
 
 Explicit episode identifiers take priority. Season folders provide context for filenames with only episode numbers. Numeric-sequence inference requires evidence in both input folders and is disclosed in the preview. Duplicate candidates, conflicting identifiers and multi-episode files remain unresolved. File order is never a pairing rule.
 
-`--dry-run` previews matches without opening media or creating outputs. Normal execution probes media before scheduling. `--strict` stops on unresolved inputs; otherwise the command processes clear matches and returns a review status for the rest.
+Filename matches are then checked by content. Each video's soundtrack is compared with the AD tracks, decoding each file once into the analysis cache that processing reuses. A pair whose audio agrees is confirmed. Files whose pair fails are re-paired only when each has exactly one clear match elsewhere; duplicates and ambiguous matches are reported, never guessed. A pair whose files match nothing else keeps its filename pairing, because a speed-changed AD track can only be identified after speed correction, and the per-episode identity check still applies.
+
+When a re-paired video and AD carry different episode numbers, `--label-from auto` (the default) looks for "previously on" recaps: a recap replays scenes from earlier episodes, which reveals the true story order. Without decisive recap evidence the video's number is kept. `--label-from video` or `--label-from ad` chooses explicitly, and `--no-content-check` pairs by filenames alone.
+
+`--dry-run` previews matches, including the content check, without creating outputs. Normal execution probes media before scheduling. `--strict` stops on unresolved inputs; otherwise the command processes clear matches and returns a review status for the rest.
 
 ## Processing
 

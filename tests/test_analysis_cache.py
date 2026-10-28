@@ -20,6 +20,25 @@ def test_pipeline_reuses_analysis_and_recomputes_only_changed_source(pipeline_ca
     assert len(pipeline_case.extractions) == 3
 
 
+def test_season_content_check_decode_is_reused_by_the_pipeline(pipeline_case, monkeypatch, tmp_path):
+    from adsync.config import SyncConfig
+    from adsync.features.analysis_audio import analysis_stream, load_analysis_audio
+    from adsync.media.probe import probe
+
+    monkeypatch.setenv("ADSYNC_CACHE_DIR", str(tmp_path / "artifacts"))
+    Path("video.mkv").write_bytes(b"video source")
+    Path("ad.wav").write_bytes(b"audio source")
+    config = SyncConfig(mode="offset", analysis_sr=pipeline_case.sr, fingerprint=False,
+                        speed_detect=False, device="cpu")
+    for name, video in (("video.mkv", True), ("ad.wav", False)):
+        info = probe(Path(name))
+        audio = load_analysis_audio(Path(name), info, analysis_stream(info, config) if video else None, config)
+        assert np.array_equal(audio, pipeline_case.source)
+    assert len(pipeline_case.extractions) == 2
+    pipeline_case.run()
+    assert len(pipeline_case.extractions) == 2
+
+
 def test_source_mutation_during_decode_cannot_poison_audio_cache(pipeline_case, monkeypatch, tmp_path):
     from adsync.media import extract
 

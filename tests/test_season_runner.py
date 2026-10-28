@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import socket
+import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -305,6 +308,49 @@ def test_output_reservation_coordinates_different_state_directories(season):
         report = season.run([pair], state_dir=season.state_dir / "other")
     assert report.counts == {"conflict": 1}
     assert not season.processes
+
+
+def _leave_lock(path: Path, pid: int, started: str, host: str | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"token": "left-behind", "pid": pid, "host": host or socket.gethostname(),
+                                "started": started, "description": "earlier run"}), encoding="utf-8")
+
+
+def _exited_pid() -> int:
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    process.wait()
+    return process.pid
+
+
+def test_lock_left_by_a_killed_run_is_reclaimed(tmp_path):
+    path = tmp_path / "run.lock"
+    _leave_lock(path, _exited_pid(), "2026-01-01T00:00:00+00:00")
+    with runner._exclusive_lock(path, "test") as owner:
+        assert json.loads(path.read_text(encoding="utf-8"))["token"] == owner["token"]
+    assert not path.exists()
+
+
+def test_lock_whose_pid_was_reused_by_a_newer_process_is_reclaimed(tmp_path):
+    path = tmp_path / "run.lock"
+    _leave_lock(path, os.getpid(), "2000-01-01T00:00:00+00:00")
+    with runner._exclusive_lock(path, "test"):
+        pass
+
+
+def test_lock_held_by_a_live_run_still_blocks(tmp_path):
+    path = tmp_path / "run.lock"
+    _leave_lock(path, os.getpid(), runner._timestamp())
+    with pytest.raises(runner.BatchStateError, match="locked"):
+        with runner._exclusive_lock(path, "test"):
+            pass
+
+
+def test_lock_from_another_computer_is_never_reclaimed(tmp_path):
+    path = tmp_path / "run.lock"
+    _leave_lock(path, _exited_pid(), "2026-01-01T00:00:00+00:00", host="another-computer")
+    with pytest.raises(runner.BatchStateError, match="locked"):
+        with runner._exclusive_lock(path, "test"):
+            pass
 
 
 def test_interrupt_cancels_active_workers_and_preserves_pending(season, monkeypatch):

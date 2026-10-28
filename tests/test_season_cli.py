@@ -73,6 +73,77 @@ def test_explicit_missing_episode_is_not_silently_ignored(tmp_path):
     assert "S01E99" in result.output
 
 
+def _fake_recordings(monkeypatch, contents: dict[str, int]):
+    """Stand in for audio decoding: each file name maps to the episode it really holds."""
+    import numpy as np
+    from adsync.batch import content_pairing
+    from adsync.quality import fingerprint_features
+
+    monkeypatch.setenv("ADSYNC_CACHE_DIR", "off")
+    rate = 8000
+
+    def load(path, config, *, video, threads=1):
+        audio = np.random.default_rng(contents[Path(path).name]).normal(scale=0.1, size=rate * 60)
+        return fingerprint_features(audio.astype(np.float32), rate)
+
+    monkeypatch.setattr(content_pairing, "load_recording_features", load)
+
+
+def _swapped_video_folders(tmp_path, monkeypatch):
+    video, ad = tmp_path / "video", tmp_path / "ad"
+    video.mkdir()
+    ad.mkdir()
+    for n in (1, 2, 3):
+        (video / f"Show.S01E0{n}.mkv").touch()
+        (ad / f"Show.S01E0{n}.mp3").touch()
+    _fake_recordings(monkeypatch, {"Show.S01E01.mkv": 2, "Show.S01E02.mkv": 1, "Show.S01E03.mkv": 3,
+                                   "Show.S01E01.mp3": 1, "Show.S01E02.mp3": 2, "Show.S01E03.mp3": 3})
+    return video, ad
+
+
+def test_season_repairs_swapped_files_by_audio_before_processing(tmp_path, monkeypatch):
+    video, ad = _swapped_video_folders(tmp_path, monkeypatch)
+    result = CliRunner().invoke(app, ["season", str(video), str(ad), "--output-dir", str(tmp_path / "out"),
+                                     "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "S01E01: Show.S01E01.mkv + Show.S01E02.mp3" in result.output
+    assert "S01E02: Show.S01E02.mkv + Show.S01E01.mp3" in result.output
+    assert "S01E03: Show.S01E03.mkv + Show.S01E03.mp3" in result.output
+    assert "2 re-paired" in result.output
+
+
+def test_label_from_ad_numbers_repaired_outputs_by_the_ad_files(tmp_path, monkeypatch):
+    video, ad = _swapped_video_folders(tmp_path, monkeypatch)
+    result = CliRunner().invoke(app, ["season", str(video), str(ad), "--output-dir", str(tmp_path / "out"),
+                                     "--label-from", "ad", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    pair = lines.index("S01E01: Show.S01E02.mkv + Show.S01E01.mp3")
+    assert lines[pair + 1].endswith(str(Path("Season 01") / "Show.S01E01.AD.mkv"))
+
+
+def test_no_content_check_pairs_by_filenames_without_reading_audio(tmp_path, monkeypatch):
+    from adsync.batch import content_pairing
+
+    video, ad = _swapped_video_folders(tmp_path, monkeypatch)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("audio was read")
+
+    monkeypatch.setattr(content_pairing, "load_recording_features", forbidden)
+    result = CliRunner().invoke(app, ["season", str(video), str(ad), "--no-content-check", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert "S01E01: Show.S01E01.mkv + Show.S01E01.mp3" in result.output
+
+
+def test_unknown_label_source_is_rejected_before_reading_files(tmp_path):
+    video, ad = _folders(tmp_path)
+    result = CliRunner().invoke(app, ["season", str(video), str(ad), "--label-from", "sideways", "--dry-run"])
+    assert result.exit_code == 2
+    assert "No such option" not in result.output
+    assert "auto, video, ad" in result.output
+
+
 def test_explicit_missing_season_is_not_silently_ignored(tmp_path):
     video, ad = _folders(tmp_path)
     result = CliRunner().invoke(app, ["season", str(video), str(ad), "--season", "1",

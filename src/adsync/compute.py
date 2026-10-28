@@ -23,18 +23,33 @@ class CudaBackendError(RuntimeError):
     """CUDA was explicitly requested but cannot execute the correlation."""
 
 
+def sliding_window_energy(xp, region, length: int):
+    """Per-position energy of ``length``-sample windows and a usable mask.
+
+    Windows whose energy is below the cumulative sum's worst-case rounding
+    error are indistinguishable from silence; dividing by them produced
+    normalized scores far above 1 in near-silent passages.
+    """
+    npos = region.size - length + 1
+    cumulative = xp.empty(region.size + 1, dtype=xp.float64)
+    cumulative[0] = 0.0
+    xp.cumsum(region ** 2, out=cumulative[1:])
+    energy = cumulative[length:length + npos] - cumulative[:npos]
+    tolerance = 4 * np.finfo(np.float64).eps * region.size * float(cumulative[-1])
+    return energy, energy > max(tolerance, 1e-20)
+
+
+def _normalize(xp, raw, region, length: int, template_energy: float):
+    energy, usable = sliding_window_energy(xp, region, length)
+    norms = xp.sqrt(xp.where(usable, energy, 1.0))
+    return xp.clip(xp.where(usable, raw / (template_energy * norms), 0.0), -1.0, 1.0)
+
+
 def _cpu_normalized(
     region: NDArray, template: NDArray, template_energy: float,
 ) -> NDArray:
     raw = scipy_fftconvolve(region, template[::-1], mode="valid")
-    npos = len(raw)
-    cumulative = np.empty(len(region) + 1, dtype=np.float64)
-    cumulative[0] = 0.0
-    np.cumsum(region ** 2, out=cumulative[1:])
-    norms = np.sqrt(np.maximum(
-        cumulative[len(template):len(template) + npos] - cumulative[:npos], 1e-20,
-    ))
-    return raw / (template_energy * norms)
+    return _normalize(np, raw, region, len(template), template_energy)
 
 
 class _CudaEngine:
@@ -73,16 +88,10 @@ class _CudaEngine:
             r = cp.asarray(region, dtype=cp.float64)
             t = cp.asarray(template, dtype=cp.float64)
             raw = self._fftconvolve(r, t[::-1], mode="valid")
-            npos = raw.size
-            cumulative = cp.empty(r.size + 1, dtype=cp.float64)
-            cumulative[0] = 0.0
-            cp.cumsum(r ** 2, out=cumulative[1:])
-            norms = cp.sqrt(cp.maximum(
-                cumulative[t.size:t.size + npos] - cumulative[:npos], 1e-20,
-            ))
+            result = _normalize(cp, raw, r, t.size, template_energy)
             # Blocking copy completes all kernels before releasing the lock or
             # returning success, including asynchronous device error reporting.
-            return cp.asnumpy(raw / (template_energy * norms), blocking=True)
+            return cp.asnumpy(result, blocking=True)
 
     def fftconvolve(self, a: NDArray, b: NDArray, mode: str) -> NDArray:
         cp = self.cp
