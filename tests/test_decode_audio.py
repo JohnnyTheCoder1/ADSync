@@ -32,26 +32,21 @@ def sources(tmp_path_factory):
     return {"stereo": stereo, "surround": surround}
 
 
-def _wav_route(path, wav, *, sr, mono, sample_fmt, speed_ratio=None):
+def _wav_route(path, wav, *, sr, mono, sample_fmt):
     # The pre-change route: ffmpeg writes a WAV file and librosa reads it back.
-    filters = []
-    if speed_ratio:
-        filters = ["-af", f"aresample={sr},asetrate={round(sr / speed_ratio)},aresample={sr}:filter_size=256:cutoff=0.985"]
     codec = {"s16": "pcm_s16le", "f32": "pcm_f32le"}[sample_fmt]
-    _ffmpeg("-i", path, "-map", "0:0", *filters, "-ar", sr, *(["-ac", "1"] if mono else []),
+    _ffmpeg("-i", path, "-map", "0:0", "-ar", sr, *(["-ac", "1"] if mono else []),
             "-c:a", codec, "-f", "wav", wav)
     return librosa.load(str(wav), sr=sr, mono=mono)[0]
 
 
-@pytest.mark.parametrize("name, sr, mono, sample_fmt, speed_ratio", [
-    ("stereo", 16000, True, "s16", None),
-    ("surround", 48000, False, "f32", None),
-    ("stereo", 44100, False, "f32", 25 / 24),
+@pytest.mark.parametrize("name, sr, mono, sample_fmt", [
+    ("stereo", 16000, True, "s16"),
+    ("surround", 48000, False, "f32"),
 ])
-def test_decode_matches_wav_route_sample_for_sample(sources, tmp_path, name, sr, mono, sample_fmt, speed_ratio):
-    expected = _wav_route(sources[name], tmp_path / "old.wav", sr=sr, mono=mono,
-                          sample_fmt=sample_fmt, speed_ratio=speed_ratio)
-    decoded = decode_audio(probe(sources[name]), sr=sr, mono=mono, sample_fmt=sample_fmt, speed_ratio=speed_ratio)
+def test_decode_matches_wav_route_sample_for_sample(sources, tmp_path, name, sr, mono, sample_fmt):
+    expected = _wav_route(sources[name], tmp_path / "old.wav", sr=sr, mono=mono, sample_fmt=sample_fmt)
+    decoded = decode_audio(probe(sources[name]), sr=sr, mono=mono, sample_fmt=sample_fmt)
     assert decoded.dtype == np.float32
     assert decoded.shape == expected.shape
     assert np.array_equal(decoded, expected)
@@ -70,3 +65,19 @@ def test_decode_failure_raises_ffmpeg_error(tmp_path):
     stream = StreamInfo(index=0, codec_type="audio", channels=2, sample_rate=48000)
     with pytest.raises(FFmpegError):
         decode_audio(MediaInfo(path=str(broken), duration=1.0, audio_streams=[stream]))
+
+
+def test_speed_correction_uses_the_analysis_time_scale(tmp_path):
+    # The analysis stretches by exactly up/down; the rendered AD must land on the same scale.
+    from adsync.align.speed import stretch_fraction
+
+    sr, stretch = 44100, 25 / 24 * (1 + 1.23e-4)
+    source = tmp_path / "clicks.flac"
+    _ffmpeg("-f", "lavfi", "-i", "aevalsrc='0.9*(between(t,10,10.0003)+between(t,290,290.0003))':s=44100:d=300",
+            "-c:a", "flac", source)
+    y = decode_audio(probe(source), sr=sr, mono=True, sample_fmt="f32", speed_ratio=stretch)
+    up, down = stretch_fraction(stretch)
+    for t in (10.0, 290.0):
+        expected = t * up / down
+        window = y[int((expected - 0.05) * sr):int((expected + 0.05) * sr)]
+        assert abs(expected - 0.05 + np.argmax(np.abs(window)) / sr - expected) <= 0.0005

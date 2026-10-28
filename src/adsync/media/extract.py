@@ -37,13 +37,14 @@ def decode_audio(
     becomes leading silence and timestamp gaps are filled, as a player would.
     Returns ``(frames,)`` for single-channel output, else ``(channels, frames)``.
     ``s16`` keeps the analysis quantization; ``f32`` is for rebuild sources.
+    *speed_ratio* stretches by the same exact fraction the analysis uses.
     """
     if sample_fmt not in _SAMPLE_FORMATS:
         raise ValueError(f"Unsupported sample_fmt {sample_fmt!r} (use 's16' or 'f32')")
     stream = _select_stream(info, stream_index)
     codec, dtype = _SAMPLE_FORMATS[sample_fmt]
     args = [
-        "-v", "error", "-i", info.path, "-map", f"0:{stream.index}", *_timeline_filter(sr, speed_ratio),
+        "-v", "error", "-i", info.path, "-map", f"0:{stream.index}", "-af", "aresample=async=1",
         "-ar", str(sr), *(["-ac", "1"] if mono else []), "-c:a", codec, "-f", "wav", "pipe:1",
     ]
     proc = subprocess.Popen(
@@ -56,9 +57,9 @@ def decode_audio(
     try:
         channels = _read_wav_header(proc.stdout)
         frame_bytes = (channels or 1) * dtype.itemsize
-        lead = max(0.0, (stream.start_time or 0.0) - (info.start_time or 0.0)) * (speed_ratio or 1.0)
+        lead = max(0.0, (stream.start_time or 0.0) - (info.start_time or 0.0))
         seconds = stream.duration or info.duration or _UNKNOWN_DURATION_SEC
-        frames_hint = int((seconds * (speed_ratio or 1.0) + 1.0) * sr)
+        frames_hint = int((seconds + 1.0) * sr)
         raw = _read_to_end(proc.stdout, frames_hint * frame_bytes, lead_bytes=round(lead * sr) * frame_bytes)
         proc.wait()
     finally:
@@ -77,12 +78,16 @@ def decode_audio(
     if sample_fmt == "s16":
         samples = samples.astype(np.float32)
         samples *= np.float32(1 / 32768)  # libsndfile's int16 scaling, so results match a WAV read
+    if channels > 1:
+        samples = samples.reshape(-1, channels).T
+    if speed_ratio is not None and abs(speed_ratio - 1.0) > 1e-9:
+        samples = _stretch(samples, speed_ratio)
     log.info(
         "Decoded %s stream %d: %d Hz, %d ch%s",
         Path(info.path).name, stream.index, sr, channels,
         f", speed x{speed_ratio:.6f}" if speed_ratio else "",
     )
-    return samples if channels == 1 else samples.reshape(-1, channels).T
+    return samples
 
 
 def _select_stream(info: MediaInfo, stream_index: int | None) -> StreamInfo:
@@ -96,12 +101,15 @@ def _select_stream(info: MediaInfo, stream_index: int | None) -> StreamInfo:
     raise ValueError(f"No audio stream {stream_index} in {info.path}")
 
 
-def _timeline_filter(sr: int, speed_ratio: float | None) -> list[str]:
-    # async=1 fills timestamp gaps with silence (and trims overlaps) instead of closing them up.
-    if speed_ratio is None or abs(speed_ratio - 1.0) <= 1e-9:
-        return ["-af", "aresample=async=1"]
-    shifted = round(sr / speed_ratio)
-    return ["-af", f"aresample={sr}:async=1,asetrate={shifted},aresample={sr}:filter_size=256:cutoff=0.985"]
+def _stretch(y: NDArray[np.float32], stretch: float) -> NDArray[np.float32]:
+    """Resample by exactly the analysis ratio, so playback time scales by *stretch* and pitch follows."""
+    import soxr
+
+    from adsync.align.speed import stretch_fraction
+
+    up, down = stretch_fraction(stretch)
+    out = soxr.resample(y.T if y.ndim == 2 else y, down, up, quality="VHQ")
+    return out.T if y.ndim == 2 else out
 
 
 def _read_wav_header(stream: BinaryIO) -> int | None:
