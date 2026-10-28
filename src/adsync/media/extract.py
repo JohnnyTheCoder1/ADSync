@@ -1,19 +1,28 @@
-"""Extract audio from media files to analysis WAVs."""
+"""Decode audio from media files for analysis and rendering."""
 
 from __future__ import annotations
 
 import logging
+import struct
+import subprocess
+import threading
 from pathlib import Path
+from typing import BinaryIO
 
-from adsync.models import MediaInfo
-from adsync.utils.subprocesses import run_ffmpeg
+import numpy as np
+from numpy.typing import NDArray
+
+from adsync.models import MediaInfo, StreamInfo
+from adsync.utils.subprocesses import NO_WINDOW, FFmpegError, ffmpeg_command
 
 log = logging.getLogger("adsync")
 
+_SAMPLE_FORMATS = {"s16": ("pcm_s16le", np.dtype("<i2")), "f32": ("pcm_f32le", np.dtype("<f4"))}
+_UNKNOWN_DURATION_SEC = 600.0  # initial buffer when the probe reports no duration
 
-def extract_audio(
+
+def decode_audio(
     info: MediaInfo,
-    output_path: Path,
     *,
     stream_index: int | None = None,
     sr: int = 16000,
@@ -21,62 +30,106 @@ def extract_audio(
     speed_ratio: float | None = None,
     sample_fmt: str = "s16",
     threads: int | None = None,
-) -> Path:
-    """Extract an audio stream to a standardized WAV file.
+) -> NDArray[np.float32]:
+    """Decode one audio stream straight into memory, with no intermediate file.
 
-    Parameters
-    ----------
-    info:
-        Probed media info.
-    output_path:
-        Destination WAV path.
-    stream_index:
-        Audio stream index to extract. If *None* the first audio stream is used.
-    sr:
-        Target sample rate.
-    mono:
-        Convert to mono.
-    speed_ratio:
-        When set, stretch the audio by this factor (>1 = slower and longer)
-        with pitch following — a plain resample, the exact inverse of a
-        PAL-style transfer.  Rate-normalize first so the factor applies
-        regardless of the source sample rate.
-    sample_fmt:
-        "s16" for analysis WAVs, "f32" for rebuild sources that should not
-        pick up an extra quantization stage.
+    Returns ``(frames,)`` for single-channel output, else ``(channels, frames)``.
+    ``s16`` keeps the analysis quantization; ``f32`` is for rebuild sources.
     """
+    if sample_fmt not in _SAMPLE_FORMATS:
+        raise ValueError(f"Unsupported sample_fmt {sample_fmt!r} (use 's16' or 'f32')")
+    stream = _select_stream(info, stream_index)
+    codec, dtype = _SAMPLE_FORMATS[sample_fmt]
+    args = [
+        "-v", "error", "-i", info.path, "-map", f"0:{stream.index}", *_speed_filter(sr, speed_ratio),
+        "-ar", str(sr), *(["-ac", "1"] if mono else []), "-c:a", codec, "-f", "wav", "pipe:1",
+    ]
+    proc = subprocess.Popen(
+        ffmpeg_command(args, threads=threads),
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **NO_WINDOW,
+    )
+    errors: list[bytes] = []
+    drain = threading.Thread(target=lambda: errors.append(proc.stderr.read()), daemon=True)
+    drain.start()
+    try:
+        channels = _read_wav_header(proc.stdout)
+        seconds = stream.duration or info.duration or _UNKNOWN_DURATION_SEC
+        frames_hint = int((seconds * (speed_ratio or 1.0) + 1.0) * sr)
+        raw = _read_to_end(proc.stdout, frames_hint * (channels or 1) * dtype.itemsize)
+        proc.wait()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        drain.join()
+        proc.stdout.close()
+        proc.stderr.close()
+    if proc.returncode != 0:
+        raise FFmpegError(proc.returncode, b"".join(errors))
+    if not channels:
+        raise ValueError(f"ffmpeg decoded no audio from {info.path}")
+
+    samples = raw[: raw.size - raw.size % (channels * dtype.itemsize)].view(dtype)
+    if sample_fmt == "s16":
+        samples = samples.astype(np.float32)
+        samples *= np.float32(1 / 32768)  # libsndfile's int16 scaling, so results match a WAV read
+    log.info(
+        "Decoded %s stream %d: %d Hz, %d ch%s",
+        Path(info.path).name, stream.index, sr, channels,
+        f", speed x{speed_ratio:.6f}" if speed_ratio else "",
+    )
+    return samples if channels == 1 else samples.reshape(-1, channels).T
+
+
+def _select_stream(info: MediaInfo, stream_index: int | None) -> StreamInfo:
     if not info.audio_streams:
         raise ValueError(f"No audio streams found in {info.path}")
-
     if stream_index is None:
-        stream_index = info.audio_streams[0].index
+        return info.audio_streams[0]
+    for stream in info.audio_streams:
+        if stream.index == stream_index:
+            return stream
+    raise ValueError(f"No audio stream {stream_index} in {info.path}")
 
-    channels_args = ["-ac", "1"] if mono else []
 
-    filter_args: list[str] = []
-    if speed_ratio is not None and abs(speed_ratio - 1.0) > 1e-9:
-        shifted = round(sr / speed_ratio)
-        filter_args = ["-af", f"aresample={sr},asetrate={shifted},aresample={sr}:filter_size=256:cutoff=0.985"]
+def _speed_filter(sr: int, speed_ratio: float | None) -> list[str]:
+    if speed_ratio is None or abs(speed_ratio - 1.0) <= 1e-9:
+        return []
+    shifted = round(sr / speed_ratio)
+    return ["-af", f"aresample={sr},asetrate={shifted},aresample={sr}:filter_size=256:cutoff=0.985"]
 
-    codecs = {"s16": "pcm_s16le", "f32": "pcm_f32le"}
-    if sample_fmt not in codecs:
-        raise ValueError(f"Unsupported sample_fmt {sample_fmt!r} (use 's16' or 'f32')")
 
-    args = [
-        "-i", info.path,
-        "-map", f"0:{stream_index}",
-        *filter_args,
-        "-ar", str(sr),
-        *channels_args,
-        "-c:a", codecs[sample_fmt],
-        "-f", "wav",
-        str(output_path),
-    ]
+def _read_wav_header(stream: BinaryIO) -> int | None:
+    """Consume a streamed WAV header up to the sample data; return its channel count."""
+    riff = stream.read(12)
+    if len(riff) < 12:
+        return None
+    if riff[:4] not in (b"RIFF", b"RF64") or riff[8:12] != b"WAVE":
+        raise ValueError("ffmpeg did not produce a WAV stream")
+    channels = None
+    while True:
+        head = stream.read(8)
+        if len(head) < 8:
+            return None
+        chunk, size = head[:4], struct.unpack("<I", head[4:])[0]
+        if chunk == b"data":
+            return channels
+        body = stream.read(size + (size & 1))
+        if chunk == b"fmt ":
+            channels = struct.unpack("<H", body[2:4])[0]
 
-    run_ffmpeg(args, threads=threads)
-    log.info(
-        "Extracted audio → %s (%d Hz, %s%s)",
-        output_path.name, sr, "mono" if mono else "stereo",
-        f", speed ×{speed_ratio:.6f}" if speed_ratio else "",
-    )
-    return output_path
+
+def _read_to_end(stream: BinaryIO, size_hint: int) -> NDArray[np.uint8]:
+    buf = np.empty(max(size_hint, 1 << 16), dtype=np.uint8)
+    filled = 0
+    while True:
+        if filled == buf.size:
+            grown = np.empty(buf.size + buf.size // 2, dtype=np.uint8)
+            grown[:filled] = buf
+            buf = grown
+        count = stream.readinto(memoryview(buf)[filled:])
+        if not count:
+            break
+        filled += count
+    # Release over-allocation left by a short duration estimate.
+    return buf[:filled] if filled >= 0.9 * buf.size else buf[:filled].copy()

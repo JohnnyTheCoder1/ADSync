@@ -34,10 +34,10 @@ def run_pipeline(
     from adsync.align.drift import estimate_drift
     from adsync.align.global_offset import estimate_global_offset
     from adsync.align.piecewise_map import build_piecewise_map
+    from adsync.features.analysis_audio import decode_analysis_audio
     from adsync.features.extract_basic import extract_basic_features
-    from adsync.features.load import load_wav
     from adsync.features.preprocess import preprocess
-    from adsync.media.extract import extract_audio
+    from adsync.media.extract import decode_audio
     from adsync.media.mux import mux_ad_track
     from adsync.media.output import OutputPublicationError, validate_output_path
     from adsync.media.probe import probe
@@ -87,7 +87,7 @@ def run_pipeline(
             raise ValueError(f"No audio streams in AD file: {ad_path}")
 
         # ── Step 2: Extract analysis WAVs ────────────────────────────────
-        log.info("Step 2/12: Extracting analysis WAVs")
+        log.info("Step 2/12: Decoding analysis audio")
         vid_wav = workdir.child("video_audio.wav")
         ad_wav = workdir.child("ad_audio.wav")
         ad_hq_wav = workdir.child("ad_audio_hq.wav")
@@ -137,24 +137,26 @@ def run_pipeline(
         from concurrent.futures import ThreadPoolExecutor, as_completed
         pair_workers = min(2, threads)
         extraction_threads = max(1, threads // pair_workers)
+        decoded = {}
         with ThreadPoolExecutor(max_workers=pair_workers, initializer=worker_initializer(threads)) as pool:
-            futures = [pool.submit(extract_audio, info, wav, sr=config.analysis_sr,
-                                   mono=config.mono, stream_index=stream, threads=extraction_threads)
-                       for index, (_, info, wav, stream) in enumerate(source_specs)
-                       if cached_audio[index] is None]
-            for f in as_completed(futures):
-                f.result()
+            futures = {pool.submit(decode_analysis_audio, info, stream, config, threads=extraction_threads): index
+                       for index, (_, info, _, stream) in enumerate(source_specs)
+                       if cached_audio[index] is None}
+            for future in as_completed(futures):
+                decoded[futures[future]] = future.result()
 
         # ── Step 3: Load & preprocess ────────────────────────────────────
-        log.info("Step 3/12: Loading and preprocessing audio")
+        log.info("Step 3/12: Preprocessing audio")
         # trim_silence=False: trimming removes different amounts of leading
         # silence from each track, destroying the timing relationship needed
         # for offset/drift estimation.
         sr = config.analysis_sr
         for index, (_, _, wav, _) in enumerate(source_specs):
-            if cached_audio[index] is None:
-                y, _ = load_wav(wav, sr=sr)
-                cached_audio[index] = preprocess(y, sr, highpass_hz=config.highpass_hz, trim_silence=False)
+            if index in decoded:
+                if debug_dir:
+                    export_wav(decoded[index], sr, wav)
+                cached_audio[index] = preprocess(decoded.pop(index), sr, highpass_hz=config.highpass_hz,
+                                                 trim_silence=False)
                 if cache is not None and source_keys[index] is not None:
                     if content_key(source_specs[index][0], source_options[index]) != source_keys[index]:
                         raise RuntimeError(f"Source changed during analysis decode: {source_specs[index][0]}")
@@ -629,12 +631,14 @@ def run_pipeline(
 
         if (mux or debug_dir) and not identity_failed:
             log.info("Step 9/12: Rebuilding synced AD track (HQ)")
-            extract_audio(
-                ad_info, ad_hq_wav, sr=ad_hq_sr, mono=False,
+            y_ad_hq = decode_audio(
+                ad_info, sr=ad_hq_sr, mono=False,
                 speed_ratio=speed_stretch, sample_fmt="f32",
                 threads=threads,
             )
-            y_ad_hq, hq_sr = load_wav(ad_hq_wav, sr=ad_hq_sr, mono=False)
+            hq_sr = ad_hq_sr
+            if debug_dir:
+                export_wav(y_ad_hq, hq_sr, ad_hq_wav, subtype="FLOAT")
             hq_video_duration = video_duration
 
             if mode == "warp" and warp_fns is not None:

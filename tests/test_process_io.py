@@ -114,7 +114,12 @@ def _spawn_qc_hashes(tmp_path):
     verify_video_preservation(tmp_path / "source.mkv", tmp_path / "rendered.mkv")
 
 
-@pytest.mark.parametrize("spawn", [_spawn_prep, _spawn_qc_decode, _spawn_qc_hashes])
+def _spawn_decode(tmp_path):
+    from adsync.media.extract import decode_audio
+    decode_audio(_two_audio_streams(tmp_path / "in.mkv"))
+
+
+@pytest.mark.parametrize("spawn", [_spawn_prep, _spawn_qc_decode, _spawn_qc_hashes, _spawn_decode])
 def test_ffmpeg_children_never_inherit_console_input(monkeypatch, tmp_path, spawn):
     calls = []
 

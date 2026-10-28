@@ -68,6 +68,11 @@ def ffmpeg_prefix() -> list[str]:
     return [_find_binary("ffmpeg"), "-nostdin", "-hide_banner"]
 
 
+def ffmpeg_command(args: list[str], *, threads: int | None = None) -> list[str]:
+    """A complete single-output ffmpeg command with the run's thread budget applied."""
+    return [*ffmpeg_prefix(), "-nostats", "-y", *_threaded_args(args, threads)]
+
+
 def _parse_ffmpeg_error(stderr: str) -> str:
     """Extract the most relevant error line from FFmpeg's stderr."""
     for line in reversed(stderr.strip().splitlines()):
@@ -101,7 +106,7 @@ def run_ffmpeg(args: list[str], *, check: bool = True, threads: int | None = Non
 
     Raises :class:`FFmpegError` with a parsed message on failure.
     """
-    cmd = [*ffmpeg_prefix(), "-nostats", "-y", *_threaded_args(args, threads)]
+    cmd = ffmpeg_command(args, threads=threads)
     log.debug("ffmpeg %s", " ".join(args))
     raw = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, check=False, **NO_WINDOW)
     result = subprocess.CompletedProcess(cmd, raw.returncode, decode_output(raw.stdout), decode_output(raw.stderr))
@@ -121,7 +126,7 @@ def run_ffmpeg_streamed(
     Returns the Popen object so the caller can write chunks to ``proc.stdin``
     and call ``proc.stdin.close()`` + ``proc.wait()`` when done.
     """
-    cmd = [*ffmpeg_prefix(), "-nostats", "-y", *_threaded_args(args, threads)]
+    cmd = ffmpeg_command(args, threads=threads)
     log.debug("ffmpeg %s", " ".join(args))
     return subprocess.Popen(
         cmd,

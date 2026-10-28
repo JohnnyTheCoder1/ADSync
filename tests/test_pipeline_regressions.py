@@ -44,12 +44,9 @@ def pipeline_case(monkeypatch, tmp_path):
             audio_streams=[StreamInfo(index=0, codec_type="audio", sample_rate=sr)],
         )
 
-    def fake_extract(info, output_path, **kwargs):
-        state.extractions.append((Path(output_path).name, kwargs.copy()))
-        return output_path
-
-    def fake_load(path, *, sr=sr, mono=True):
-        return source.copy(), sr
+    def fake_decode_audio(info, **kwargs):
+        state.extractions.append((Path(info.path).name, kwargs.copy()))
+        return source.copy()
 
     def fake_features(y, sr, **kwargs):
         return FeatureBundle(
@@ -81,8 +78,7 @@ def pipeline_case(monkeypatch, tmp_path):
         state.original_audio = kwargs.get("original_audio")
 
     monkeypatch.setattr("adsync.media.probe.probe", fake_probe)
-    monkeypatch.setattr("adsync.media.extract.extract_audio", fake_extract)
-    monkeypatch.setattr("adsync.features.load.load_wav", fake_load)
+    monkeypatch.setattr("adsync.media.extract.decode_audio", fake_decode_audio)
     monkeypatch.setattr("adsync.features.preprocess.preprocess", lambda y, *a, **kw: y)
     monkeypatch.setattr("adsync.features.extract_basic.extract_basic_features", fake_features)
     monkeypatch.setattr("adsync.align.global_offset.estimate_global_offset", lambda *a, **kw: (state.offset, 0.95, [state.offset]))

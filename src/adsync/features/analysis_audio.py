@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import tempfile
 
 import numpy as np
 
@@ -28,13 +27,20 @@ def analysis_cache_options(stream: int | None, config: SyncConfig) -> dict:
     }
 
 
+def decode_analysis_audio(info: MediaInfo, stream: int | None, config: SyncConfig,
+                          *, threads: int = 1) -> np.ndarray:
+    """Analysis-rate audio before preprocessing, always one channel."""
+    from adsync.media.extract import decode_audio
+
+    y = decode_audio(info, sr=config.analysis_sr, mono=config.mono, stream_index=stream, threads=threads)
+    return y if y.ndim == 1 else y.mean(axis=0)
+
+
 def load_analysis_audio(path: Path, info: MediaInfo, stream: int | None, config: SyncConfig,
                         *, threads: int = 1) -> np.ndarray:
     """Return preprocessed analysis audio, decoding only on a cache miss."""
     from adsync.cache import content_key, default_cache
-    from adsync.features.load import load_wav
     from adsync.features.preprocess import preprocess
-    from adsync.media.extract import extract_audio
 
     cache = default_cache()
     options = analysis_cache_options(stream, config)
@@ -43,10 +49,7 @@ def load_analysis_audio(path: Path, info: MediaInfo, stream: int | None, config:
         artifact = cache.get(key)
         if artifact is not None and set(artifact) == {"audio"} and artifact["audio"].ndim == 1:
             return artifact["audio"]
-    with tempfile.TemporaryDirectory(prefix="adsync-analysis-") as work:
-        wav = Path(work) / "audio.wav"
-        extract_audio(info, wav, sr=config.analysis_sr, mono=config.mono, stream_index=stream, threads=threads)
-        y, _ = load_wav(wav, sr=config.analysis_sr)
+    y = decode_analysis_audio(info, stream, config, threads=threads)
     audio = preprocess(y, config.analysis_sr, highpass_hz=config.highpass_hz, trim_silence=False)
     if key is not None:
         if content_key(path, options) != key:

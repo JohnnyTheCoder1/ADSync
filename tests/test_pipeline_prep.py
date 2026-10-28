@@ -20,7 +20,7 @@ def test_preparation_selects_same_english_stream_for_analysis_and_final_mux(pipe
         return MediaInfo(path=str(path), duration=case.duration, audio_streams=streams)
     monkeypatch.setattr("adsync.media.probe.probe", probe)
     case.run(mux=True, prepare_audio=True)
-    video_decode = [kwargs for name, kwargs in case.extractions if name == "video_audio.wav"]
+    video_decode = [kwargs for name, kwargs in case.extractions if name == "video.mkv"]
     assert video_decode[0]["stream_index"] == 2
     assert case.original_audio.index == 2 and case.original_audio.channels == 6
 

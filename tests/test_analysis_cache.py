@@ -49,13 +49,13 @@ def test_source_mutation_during_decode_cannot_poison_audio_cache(pipeline_case, 
     options = {"kind": "preprocessed-audio", "stream": None, "sr": 8000,
                "mono": True, "highpass_hz": 80.0, "trim_silence": False}
     original_key = content_key(Path("ad.wav"), options)
-    original_extract = extract.extract_audio
-    def changing_extract(info, output_path, **kwargs):
-        result = original_extract(info, output_path, **kwargs)
+    original_decode = extract.decode_audio
+    def changing_decode(info, **kwargs):
+        result = original_decode(info, **kwargs)
         if Path(info.path).name == "ad.wav":
             Path("ad.wav").write_bytes(b"new recording")
         return result
-    monkeypatch.setattr(extract, "extract_audio", changing_extract)
+    monkeypatch.setattr(extract, "decode_audio", changing_decode)
     with pytest.raises(RuntimeError, match="Source changed"):
         pipeline_case.run()
     assert ArtifactCache(cache_root).get(original_key) is None
