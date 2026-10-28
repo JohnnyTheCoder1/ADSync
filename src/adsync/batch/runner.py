@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter, deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager
+import ctypes
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -114,22 +115,33 @@ def atomic_json(path: Path, value: dict) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def _process_gone(pid: int, reused: Callable[[float], bool]) -> bool:
+    """True when *pid* has exited, or now belongs to a process *reused* recognises by creation time."""
+    try:
+        return reused(psutil.Process(pid).create_time())
+    except psutil.NoSuchProcess:
+        return True
+    except psutil.Error:
+        return False
+
+
 def _owner_has_exited(owner: dict) -> bool:
-    """True only when a same-host owner process is provably gone or its PID was reused."""
+    """True only when a same-host owner and its worker are provably gone or their PIDs were reused."""
     try:
         if owner.get("host") != socket.gethostname():
             return False
         pid = int(owner["pid"])
         started = datetime.fromisoformat(owner["started"]).timestamp()
+        worker = owner.get("worker_pid")
+        worker_created = owner.get("worker_created")
     except (KeyError, TypeError, ValueError):
         return False
-    try:
-        # Lock timestamps have one-second resolution.
-        return psutil.Process(pid).create_time() > started + 1
-    except psutil.NoSuchProcess:
-        return True
-    except psutil.Error:
+    # Lock timestamps have one-second resolution.
+    if not _process_gone(pid, lambda created: created > started + 1):
         return False
+    # A worker can outlive its parent; without its creation time a live PID must be assumed to be it.
+    return worker is None or _process_gone(
+        int(worker), lambda created: worker_created is not None and abs(created - worker_created) > 0.01)
 
 
 def _reclaim_if_abandoned(path: Path) -> bool:
@@ -139,15 +151,67 @@ def _reclaim_if_abandoned(path: Path) -> bool:
         return False
     if not isinstance(owner, dict) or not _owner_has_exited(owner):
         return False
-    # Renaming first means only one of several racing runs can claim it.
     try:
         abandoned = path.with_name(f"{path.name}.{uuid.uuid4().hex}.abandoned")
         path.rename(abandoned)
     except OSError:
         return False
+    try:
+        claimed = json.loads(abandoned.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        claimed = {}
+    if claimed.get("token") != owner.get("token"):
+        # Another run reclaimed it first and wrote a live lock; put that lock back untouched.
+        try:
+            abandoned.rename(path)
+        except OSError:
+            log.warning("Could not restore a lock taken from another run: %s", abandoned)
+        return False
     log.warning("Reclaimed lock left by stopped process %s: %s", owner.get("pid"), path)
     abandoned.unlink(missing_ok=True)
     return True
+
+
+class _ExtendedLimits(ctypes.Structure):
+    """JOBOBJECT_EXTENDED_LIMIT_INFORMATION, flattened."""
+
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", ctypes.c_uint32), ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", ctypes.c_uint32),
+        ("Affinity", ctypes.c_size_t), ("PriorityClass", ctypes.c_uint32), ("SchedulingClass", ctypes.c_uint32),
+        *[(name, ctypes.c_uint64) for name in ("ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                                                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")],
+        ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_worker_job = None
+
+
+def _kill_with_parent(proc: subprocess.Popen) -> None:
+    """Windows: the OS kills *proc* and its children when this process ends, however it ends."""
+    global _worker_job
+    handle = getattr(proc, "_handle", None)
+    if os.name != "nt" or handle is None:
+        return
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+    kernel32.SetInformationJobObject.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    if _worker_job is None:
+        job = kernel32.CreateJobObjectW(None, None)
+        limits = _ExtendedLimits(LimitFlags=_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+        if not job or not kernel32.SetInformationJobObject(
+                job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(limits), ctypes.sizeof(limits)):
+            log.warning("Could not tie season workers to this run (error %d)", ctypes.get_last_error())
+            return
+        _worker_job = job
+    if not kernel32.AssignProcessToJobObject(_worker_job, int(handle)):
+        log.warning("Could not tie season worker %d to this run (error %d)", proc.pid, ctypes.get_last_error())
 
 
 @contextmanager
@@ -282,7 +346,12 @@ def _run_worker(job: _Job, *, config: dict, threads: int, overwrite: bool, prepa
                     env=env, **options,
                 )
                 try:
+                    _kill_with_parent(proc)
                     owner["worker_pid"] = proc.pid
+                    try:
+                        owner["worker_created"] = psutil.Process(proc.pid).create_time()
+                    except psutil.Error:
+                        pass
                     atomic_json(reservation, owner)
                     while proc.poll() is None:
                         if canceled.wait(0.1):
