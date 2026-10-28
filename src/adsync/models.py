@@ -21,12 +21,14 @@ class StreamInfo(BaseModel):
     language: str | None = None
     title: str | None = None
     duration: float | None = None
+    start_time: float | None = None
 
 
 class MediaInfo(BaseModel):
     path: str
     format_name: str | None = None
     duration: float | None = None
+    start_time: float | None = None
     video_streams: list[StreamInfo] = Field(default_factory=list)
     audio_streams: list[StreamInfo] = Field(default_factory=list)
 

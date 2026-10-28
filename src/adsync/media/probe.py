@@ -48,6 +48,7 @@ def probe(path: str | Path) -> MediaInfo:
             language=tags.get("language"),
             title=tags.get("title"),
             duration=_float_or_none(s.get("duration") or fmt.get("duration")),
+            start_time=_float_or_none(s.get("start_time")),
         )
 
         if codec_type == "video":
@@ -59,6 +60,7 @@ def probe(path: str | Path) -> MediaInfo:
         path=str(path),
         format_name=fmt.get("format_name"),
         duration=_float_or_none(fmt.get("duration")),
+        start_time=_float_or_none(fmt.get("start_time")),
         video_streams=video_streams,
         audio_streams=audio_streams,
     )

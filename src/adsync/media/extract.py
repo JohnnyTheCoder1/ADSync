@@ -33,6 +33,8 @@ def decode_audio(
 ) -> NDArray[np.float32]:
     """Decode one audio stream straight into memory, with no intermediate file.
 
+    The result follows the container's playback timeline: a start delay
+    becomes leading silence and timestamp gaps are filled, as a player would.
     Returns ``(frames,)`` for single-channel output, else ``(channels, frames)``.
     ``s16`` keeps the analysis quantization; ``f32`` is for rebuild sources.
     """
@@ -41,7 +43,7 @@ def decode_audio(
     stream = _select_stream(info, stream_index)
     codec, dtype = _SAMPLE_FORMATS[sample_fmt]
     args = [
-        "-v", "error", "-i", info.path, "-map", f"0:{stream.index}", *_speed_filter(sr, speed_ratio),
+        "-v", "error", "-i", info.path, "-map", f"0:{stream.index}", *_timeline_filter(sr, speed_ratio),
         "-ar", str(sr), *(["-ac", "1"] if mono else []), "-c:a", codec, "-f", "wav", "pipe:1",
     ]
     proc = subprocess.Popen(
@@ -53,9 +55,11 @@ def decode_audio(
     drain.start()
     try:
         channels = _read_wav_header(proc.stdout)
+        frame_bytes = (channels or 1) * dtype.itemsize
+        lead = max(0.0, (stream.start_time or 0.0) - (info.start_time or 0.0)) * (speed_ratio or 1.0)
         seconds = stream.duration or info.duration or _UNKNOWN_DURATION_SEC
         frames_hint = int((seconds * (speed_ratio or 1.0) + 1.0) * sr)
-        raw = _read_to_end(proc.stdout, frames_hint * (channels or 1) * dtype.itemsize)
+        raw = _read_to_end(proc.stdout, frames_hint * frame_bytes, lead_bytes=round(lead * sr) * frame_bytes)
         proc.wait()
     finally:
         if proc.poll() is None:
@@ -92,11 +96,12 @@ def _select_stream(info: MediaInfo, stream_index: int | None) -> StreamInfo:
     raise ValueError(f"No audio stream {stream_index} in {info.path}")
 
 
-def _speed_filter(sr: int, speed_ratio: float | None) -> list[str]:
+def _timeline_filter(sr: int, speed_ratio: float | None) -> list[str]:
+    # async=1 fills timestamp gaps with silence (and trims overlaps) instead of closing them up.
     if speed_ratio is None or abs(speed_ratio - 1.0) <= 1e-9:
-        return []
+        return ["-af", "aresample=async=1"]
     shifted = round(sr / speed_ratio)
-    return ["-af", f"aresample={sr},asetrate={shifted},aresample={sr}:filter_size=256:cutoff=0.985"]
+    return ["-af", f"aresample={sr}:async=1,asetrate={shifted},aresample={sr}:filter_size=256:cutoff=0.985"]
 
 
 def _read_wav_header(stream: BinaryIO) -> int | None:
@@ -119,9 +124,11 @@ def _read_wav_header(stream: BinaryIO) -> int | None:
             channels = struct.unpack("<H", body[2:4])[0]
 
 
-def _read_to_end(stream: BinaryIO, size_hint: int) -> NDArray[np.uint8]:
-    buf = np.empty(max(size_hint, 1 << 16), dtype=np.uint8)
-    filled = 0
+def _read_to_end(stream: BinaryIO, size_hint: int, *, lead_bytes: int = 0) -> NDArray[np.uint8]:
+    """Read a pipe to EOF into one buffer, after ``lead_bytes`` of zeros."""
+    buf = np.empty(max(size_hint + lead_bytes, 1 << 16), dtype=np.uint8)
+    buf[:lead_bytes] = 0
+    filled = lead_bytes
     while True:
         if filled == buf.size:
             grown = np.empty(buf.size + buf.size // 2, dtype=np.uint8)

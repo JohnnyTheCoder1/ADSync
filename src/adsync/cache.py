@@ -13,7 +13,7 @@ from typing import Any
 
 import numpy as np
 
-ANALYSIS_REVISION = "analysis-20260922-1"
+ANALYSIS_REVISION = "analysis-20261028-container-timeline"
 log = logging.getLogger("adsync")
 
 
