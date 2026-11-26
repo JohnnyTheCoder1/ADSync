@@ -250,18 +250,12 @@ def run_scenario(
 
     edits = edit_points(sc, dur)
     errors_ms: list[float] = []
-    # Anchor conventions differ by mode: offset/drift anchors are
-    # (source=video, target=AD); warp/piecewise anchors are
-    # (source=AD, target=video).  truth() maps AD-variant time → video time.
-    # When the pipeline auto-corrected speed, its anchors live on the
-    # corrected timeline — map back to variant time before consulting truth.
-    video_source = rep["mode"] in ("offset", "drift")
+    # All report anchors map AD source time to video target time.
+    # The pipeline already flips the drift estimator's video-to-AD anchors.
+    # Undo any automatic speed correction before consulting ground truth.
     stretch = rep.get("speed_stretch") or 1.0
     for a in rep.get("anchors", []):
-        if video_source:
-            ad_t, vid_t = a["target_time"], a["source_time"]
-        else:
-            ad_t, vid_t = a["source_time"], a["target_time"]
+        ad_t, vid_t = a["source_time"], a["target_time"]
         variant_t = ad_t / stretch
         truth = sc.truth(variant_t)
         if truth is None:
